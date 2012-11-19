@@ -113,8 +113,9 @@ struct PtexHalf {
 #ifndef DOXYGEN
     /* internal */ public:
 #endif
-    PTEXAPI static uint32_t h2fTable[65536];
-    PTEXAPI static uint16_t f2hTable[512];
+
+    static uint32_t h2fTable[65536];
+	static uint16_t f2hTable[512];
 };
 
 #endif

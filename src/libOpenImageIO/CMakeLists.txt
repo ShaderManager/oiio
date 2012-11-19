@@ -192,6 +192,10 @@ endif ()
 source_group ("libutil"    REGULAR_EXPRESSION ".+/libutil/.+")
 source_group ("libtexture" REGULAR_EXPRESSION ".+/libtexture/.+")
 
+if (WIN32 AND LINKSTATIC)
+	add_definitions (-DPTEX_STATIC)
+endif ()
+
 if (BUILDSTATIC)
     add_library (OpenImageIO STATIC ${libOpenImageIO_srcs})
 else ()

@@ -60,7 +60,7 @@ class ImageBuf;
 /// The region is [xbegin,xend) x [begin,yend) x [zbegin,zend),
 /// with the "end" designators signifying one past the last pixel,
 /// a la STL style.
-struct ROI {
+struct DLLPUBLIC ROI {
     int xbegin, xend, ybegin, yend, zbegin, zend;
     bool defined;
 
@@ -88,22 +88,22 @@ struct ROI {
 
 
 /// Union of two regions, the smallest region containing both.
-ROI roi_union (const ROI &A, const ROI &B);
+DLLPUBLIC ROI roi_union (const ROI &A, const ROI &B);
 
 /// Intersection of two regions.
-ROI roi_intersection (const ROI &A, const ROI &B);
+DLLPUBLIC ROI roi_intersection (const ROI &A, const ROI &B);
 
 /// Return pixel data window for this ImageSpec as a ROI.
-ROI get_roi (const ImageSpec &spec);
+DLLPUBLIC ROI get_roi (const ImageSpec &spec);
 
 /// Return full/display window for this ImageSpec as a ROI.
-ROI get_roi_full (const ImageSpec &spec);
+DLLPUBLIC ROI get_roi_full (const ImageSpec &spec);
 
 /// Set pixel data window for this ImageSpec to a ROI.
-void set_roi (ImageSpec &spec, const ROI &newroi);
+DLLPUBLIC void set_roi (ImageSpec &spec, const ROI &newroi);
 
 /// Set full/display window for this ImageSpec to a ROI.
-void set_roi_full (ImageSpec &spec, const ROI &newroi);
+DLLPUBLIC void set_roi_full (ImageSpec &spec, const ROI &newroi);
 
 
 
