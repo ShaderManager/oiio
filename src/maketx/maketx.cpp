@@ -71,6 +71,7 @@ static bool stats = false;
 static int nthreads = 0;    // default: use #cores threads if available
 static int tile[3] = { 64, 64, 1 };
 static std::string channellist;
+static std::string compression = "zip";
 static bool updatemode = false;
 static double stat_readtime = 0;
 static double stat_writetime = 0;
@@ -115,6 +116,7 @@ static int nchannels = -1;
 static bool prman = false;
 static bool oiio = false;
 static bool src_samples_border = false; // are src edge samples on the border?
+static bool ignore_unassoc = false;  // ignore unassociated alpha tags
 
 static bool unpremult = false;
 static std::string incolorspace;
@@ -235,9 +237,7 @@ getargs (int argc, char *argv[])
                           "uint8, sint8, uint16, sint16, half, float",
                   "--tile %d %d", &tile[0], &tile[1], "Specify tile size",
                   "--separate", &separate, "Use planarconfig separate (default: contiguous)",
-//                  "--ingamma %f", &ingamma, "Specify gamma of input files (default: 1)",
-//                  "--outgamma %f", &outgamma, "Specify gamma of output files (default: 1)",
-//                  "--opaquewidth %f", &opaquewidth, "Set z fudge factor for volume shadows",
+                  "--compression %s", &compression, "Set the compression method (default = zip, if possible)",
                   "--fov %f", &fov, "Field of view for envcube/shadcube/twofish",
                   "--fovcot %f", &fovcot, "Override the frame aspect ratio. Default is width/height.",
                   "--wrap %s", &wrap, "Specify wrap mode (black, clamp, periodic, mirror)",
@@ -266,6 +266,7 @@ getargs (int argc, char *argv[])
                   "--constant-color-detect", &constant_color_detect, "Create 1-tile textures from constant color inputs",
                   "--monochrome-detect", &monochrome_detect, "Create 1-channel textures from monochrome inputs",
                   "--opaque-detect", &opaque_detect, "Drop alpha channel that is always 1.0",
+                  "--ignore-unassoc", &ignore_unassoc, "Ignore unassociated alpha tags in input (don't autoconvert)",
                   "--stats", &stats, "Print runtime statistics",
                   "--mipimage %L", &mipimages, "Specify an individual MIP level",
 //FIXME           "-c %s", &channellist, "Restrict/shuffle channels",
@@ -393,9 +394,6 @@ set_oiio_options(TypeDesc out_dataformat)
 {
     // Interleaved channels are faster to read
     separate = false;
-    
-    // Enable constant color optimizations
-    constant_color_detect = true;
     
     // Force fixed tile-size across the board
     tile[0] = 64;
@@ -745,21 +743,34 @@ make_texturemap (const char *maptypename = "texture map")
     stat_readtime += readtimer();
     
     // If requested - and we're a constant color - make a tiny texture instead
+    // Only safe if the full/display window is the same as the data window.
+    // Also note that this could affect the appearance when using "black"
+    // wrap mode at runtime.
     std::vector<float> constantColor(src.nchannels());
-    bool isConstantColor = ImageBufAlgo::isConstantColor (src, &constantColor[0]);
-    
-    if (isConstantColor && constant_color_detect) {
-        ImageSpec newspec = src.spec();
-        
-        // Reset the image, to a new image, at the new size
-        std::string name = src.name() + ".constant_color";
-        src.reset(name, newspec);
-        
-        ImageBufAlgo::fill (src, &constantColor[0]);
-        
-        if (verbose) {
-            std::cout << "  Constant color image detected. ";
-            std::cout << "Creating " << newspec.width << "x" << newspec.height << " texture instead.\n";
+    bool isConstantColor = false;
+    if (constant_color_detect &&
+        src.spec().x == 0 && src.spec().y == 0 && src.spec().z == 0 &&
+        src.spec().full_x == 0 && src.spec().full_y == 0 &&
+        src.spec().full_z == 0 && src.spec().full_width == src.spec().width &&
+        src.spec().full_height == src.spec().height &&
+        src.spec().full_depth == src.spec().depth) {
+        isConstantColor = ImageBufAlgo::isConstantColor (src, &constantColor[0]);
+        if (isConstantColor) {
+            // Reset the image, to a new image, at the tile size
+            ImageSpec newspec = src.spec();
+            newspec.width  = std::min (tile[0], src.spec().width);
+            newspec.height = std::min (tile[1], src.spec().height);
+            newspec.depth  = std::min (tile[2], src.spec().depth);
+            newspec.full_width  = newspec.width;
+            newspec.full_height = newspec.height;
+            newspec.full_depth  = newspec.depth;
+            std::string name = src.name() + ".constant_color";
+            src.reset(name, newspec);
+            ImageBufAlgo::fill (src, &constantColor[0]);
+            if (verbose) {
+                std::cout << "  Constant color image detected. ";
+                std::cout << "Creating " << newspec.width << "x" << newspec.height << " texture instead.\n";
+            }
         }
     }
     
@@ -776,8 +787,9 @@ make_texturemap (const char *maptypename = "texture map")
     }
 
     // If requested - and we're a monochrome image - drop the extra channels
-    if (monochrome_detect && (src.nchannels() > 1) && nchannels < 0 &&
-            ImageBufAlgo::isMonochrome(src)) {
+    if (monochrome_detect && nchannels < 0 &&
+          src.nchannels() == 3 && src.spec().alpha_channel < 0 &&  // RGB only
+          ImageBufAlgo::isMonochrome(src)) {
         ImageBuf newsrc(src.name() + ".monochrome", src.spec());
         ImageBufAlgo::setNumChannels (newsrc, src, 1);
         src.copy (newsrc);
@@ -872,11 +884,10 @@ make_texturemap (const char *maptypename = "texture map")
     dstspec.tile_height = tile[1];
     dstspec.tile_depth  = tile[2];
 
-    // Always use ZIP compression
-    dstspec.attribute ("compression", "zip");
-    // Ugh, the line above seems to trigger a bug in the tiff library.
-    // Maybe a bug in libtiff zip compression for tiles?  So let's
-    // stick to the default compression.
+    dstspec.attribute ("compression", compression);
+
+    if (ignore_unassoc)
+        dstspec.erase_attribute ("oiio:UnassociatedAlpha");
 
     // Put a DateTime in the out file, either now, or matching the date
     // stamp of the input file (if update mode).
@@ -1213,8 +1224,14 @@ write_mipmap (ImageBuf &img, const ImageSpec &outspec_template,
         std::cout << "  Top level is " << formatres(outspec) << std::endl;
     }
 
-    bool ok = true;
-    ok &= img.write (out);
+    if (! img.write (out)) {
+        // ImageBuf::write transfers any errors from the ImageOutput to
+        // the ImageBuf.
+        std::cerr << "maketx ERROR: Write failed \" : " << img.geterror() << "\n";
+        out->close ();
+        exit (EXIT_FAILURE);
+    }
+
     stat_writetime += writetimer();
 
     if (mipmap) {  // Mipmap levels:
@@ -1222,7 +1239,7 @@ write_mipmap (ImageBuf &img, const ImageSpec &outspec_template,
             std::cout << "  Mipmapping...\n" << std::flush;
         ImageBuf tmp;
         ImageBuf *big = &img, *small = &tmp;
-        while (ok && (outspec.width > 1 || outspec.height > 1)) {
+        while (outspec.width > 1 || outspec.height > 1) {
             Timer miptimer;
             ImageSpec smallspec;
 
@@ -1295,7 +1312,6 @@ write_mipmap (ImageBuf &img, const ImageSpec &outspec_template,
             Timer writetimer;
             // If the format explicitly supports MIP-maps, use that,
             // otherwise try to simulate MIP-mapping with multi-image.
-            bool ok = false;
             ImageOutput::OpenMode mode = out->supports ("mipmap") ?
                 ImageOutput::AppendMIPLevel : ImageOutput::AppendSubimage;
             if (! out->open (outputfilename.c_str(), outspec, mode)) {
@@ -1303,7 +1319,14 @@ write_mipmap (ImageBuf &img, const ImageSpec &outspec_template,
                           << "\" : " << out->geterror() << "\n";
                 exit (EXIT_FAILURE);
             }
-            ok &= small->write (out);
+            if (! small->write (out)) {
+                // ImageBuf::write transfers any errors from the
+                // ImageOutput to the ImageBuf.
+                std::cerr << "maketx ERROR writing \"" << outputfilename
+                          << "\" : " << small->geterror() << "\n";
+                out->close ();
+                exit (EXIT_FAILURE);
+            }
             stat_writetime += writetimer();
             if (verbose) {
                 std::cout << "    " << formatres(smallspec) << std::endl;
@@ -1316,15 +1339,12 @@ write_mipmap (ImageBuf &img, const ImageSpec &outspec_template,
         std::cout << "  Wrote file: " << outputfilename << std::endl;
     writetimer.reset ();
     writetimer.start ();
-    if (ok)
-        ok &= out->close ();
-    stat_writetime += writetimer ();
-
-    if (! ok) {
+    if (! out->close ()) {
         std::cerr << "maketx ERROR writing \"" << outputfilename
                   << "\" : " << out->geterror() << "\n";
         exit (EXIT_FAILURE);
     }
+    stat_writetime += writetimer ();
 }
 
 
@@ -1336,12 +1356,12 @@ main (int argc, char *argv[])
     getargs (argc, argv);
 
     OIIO::attribute ("threads", nthreads);
-    if (stats) {
-        ImageCache *ic = ImageCache::create ();  // get the shared one
-        ic->attribute ("forcefloat", 1);   // Force float upon read
-        ic->attribute ("max_memory_MB", 1024.0);  // 1 GB cache
-        // N.B. This will apply to the default IC that any ImageBuf's get.
-    }
+
+    // N.B. This will apply to the default IC that any ImageBuf's get.
+    ImageCache *ic = ImageCache::create ();  // get the shared one
+    ic->attribute ("forcefloat", 1);   // Force float upon read
+    ic->attribute ("max_memory_MB", 1024.0);  // 1 GB cache
+    ic->attribute ("unassociatedalpha", (int)ignore_unassoc);
 
     if (mipmapmode) {
         make_texturemap ("texture map");
@@ -1382,7 +1402,6 @@ main (int argc, char *argv[])
     Filter2D::destroy (filter);
 
     if (stats) {
-        ImageCache *ic = ImageCache::create ();  // get the shared one
         std::cout << "\n" << ic->getstats();
     }
 

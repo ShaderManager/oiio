@@ -38,6 +38,7 @@
 #include <string>
 #include <sstream>
 #include <utility>
+#include <ctype.h>
 
 #include <boost/tokenizer.hpp>
 #include <boost/foreach.hpp>
@@ -287,14 +288,37 @@ output_file (int argc, const char *argv[])
         ir = ot.curimg;
     }
 
-    ImageOutput::OpenMode mode = ImageOutput::Create;  // initial open
+    std::vector<ImageSpec> subimagespecs (ir->subimages());
+    for (int s = 0;  s < ir->subimages();  ++s) {
+        ImageSpec spec = *ir->spec(s,0);
+        adjust_output_options (spec, ot);
+        subimagespecs[s] = spec;
+    }
+
+    // Do the initial open
+    ImageOutput::OpenMode mode = ImageOutput::Create;
+    if (ir->subimages() > 1 && out->supports("multiimage")) {
+        if (! out->open (filename, ir->subimages(), &subimagespecs[0])) {
+            std::cerr << "oiiotool ERROR: " << out->geterror() << "\n";
+            return 0;
+        }
+    } else {
+        if (! out->open (filename, subimagespecs[0], mode)) {
+            std::cerr << "oiiotool ERROR: " << out->geterror() << "\n";
+            return 0;
+        }
+    }
+
+    // Output all the subimages and MIP levels
     for (int s = 0, send = ir->subimages();  s < send;  ++s) {
         for (int m = 0, mend = ir->miplevels(s);  m < mend;  ++m) {
             ImageSpec spec = *ir->spec(s,m);
             adjust_output_options (spec, ot);
-            if (! out->open (filename, spec, mode)) {
-                std::cerr << "oiiotool ERROR: " << out->geterror() << "\n";
-                return 0;
+            if (s > 0 || m > 0) {  // already opened first subimage/level
+                if (! out->open (filename, spec, mode)) {
+                    std::cerr << "oiiotool ERROR: " << out->geterror() << "\n";
+                    return 0;
+                }
             }
             if (! (*ir)(s,m).write (out)) {
                 std::cerr << "oiiotool ERROR: " << (*ir)(s,m).geterror() << "\n";
@@ -836,6 +860,126 @@ action_unmip (int argc, const char *argv[])
 
 
 
+// For a given spec (which contains the channel names for an image), and
+// a comma separated list of channels (e.g., "B,G,R,A"), compute the
+// vector of integer indices for those channels (e.g., {2,1,0,3}).
+// Return true for success, false for failure, including if any of the
+// channels were not present in the image.
+static bool
+decode_channel_set (const ImageSpec &spec, std::string chanlist,
+                    std::vector<std::string> &channelnames,
+                    std::vector<int> &channels, std::vector<float> &values)
+{
+    channels.clear ();
+    while (chanlist.length()) {
+        // Extract the next channel name
+        size_t pos = chanlist.find_first_of(",");
+        std::string onechan (chanlist, 0, pos);
+        onechan = Strutil::strip (onechan);
+        if (pos == std::string::npos)
+            chanlist.clear();
+        else
+            chanlist = chanlist.substr (pos+1, std::string::npos);
+
+        // Find the index corresponding to that channel
+        float value = 0.0f;
+        int ch = -1;
+        for (int i = 0;  i < spec.nchannels;  ++i)
+            if (spec.channelnames[i] == onechan) {
+                ch = i;  break;
+            }
+        if (ch < 0 && onechan.length() &&
+                (isdigit(onechan[0]) || onechan[0] == '-'))
+            ch = atoi (onechan.c_str());
+        if (ch < 0 && onechan.length() && onechan[0] == '=')
+            value = atof (onechan.c_str()+1);
+        channelnames.push_back (onechan);
+        channels.push_back (ch);
+        values.push_back (value);
+    }
+    return true;
+}
+
+
+
+static int
+action_channels (int argc, const char *argv[])
+{
+    if (ot.postpone_callback (1, action_channels, argc, argv))
+        return 0;
+
+    ImageRecRef A (ot.pop());
+    ot.read (A);
+
+    std::string chanlist = argv[1];
+    if (chanlist == "RGB")   // Fix common synonyms/mistakes
+        chanlist = "R,G,B";
+    else if (chanlist == "RGBA")
+        chanlist = "R,G,B,A";
+
+    // Decode the channel set, make the full list of ImageSpec's we'll
+    // need to describe the new ImageRec with the altered channels.
+    std::vector<int> allmiplevels;
+    std::vector<ImageSpec> allspecs;
+    for (int s = 0, subimages = ot.allsubimages ? A->subimages() : 1;
+         s < subimages;  ++s) {
+        std::vector<std::string> channelnames;
+        std::vector<int> channels;
+        std::vector<float> values;
+        bool ok = decode_channel_set (*A->spec(s,0), chanlist,
+                                      channelnames, channels, values);
+        if (! ok) {
+            ot.error (argv[0], Strutil::format("Invalid or unknown channel selection \"%s\"", chanlist));
+            ot.push (A);
+            return 0;
+        }
+        int miplevels = ot.allsubimages ? A->miplevels(s) : 1;
+        allmiplevels.push_back (miplevels);
+        for (int m = 0;  m < miplevels;  ++m) {
+            ImageSpec spec = *A->spec(s,m);
+            spec.nchannels = (int)channelnames.size();
+            spec.default_channel_names ();
+            spec.channelformats.clear();
+            allspecs.push_back (spec);
+        }
+    }
+
+    // Create the replacement ImageRec
+    ImageRecRef R (new ImageRec(A->name(), (int)allmiplevels.size(),
+                                &allmiplevels[0], &allspecs[0]));
+    ot.push (R);
+
+    // Subimage by subimage, MIP level by MIP level, copy/shuffle the
+    // channels individually from the source image into the result.
+    for (int s = 0, subimages = R->subimages();  s < subimages;  ++s) {
+        std::vector<std::string> channelnames;
+        std::vector<int> channels;
+        std::vector<float> values;
+        decode_channel_set (*A->spec(s,0), chanlist, channelnames,
+                            channels, values);
+        for (int m = 0, miplevels = R->miplevels(s);  m < miplevels;  ++m) {
+            // Shuffle the indexed/named channels
+            ImageBufAlgo::channels ((*R)(s,m), (*A)(s,m), (int)channels.size(),
+                                    &channels[0], false);
+            // Set channels that are literals
+            for (int c = 0;  c < (int)channels.size();  ++c)
+                if (channels[c] < 0) {
+                    ROI roi = get_roi (*R->spec(s,m));
+                    roi.chbegin = c;
+                    roi.chend = c+1;
+                    ImageBufAlgo::fill ((*R)(s,m), &values[c], roi);
+                }
+            // Tricky subtlety: IBA::channels changed the underlying IB,
+            // we may need to update the IRR's copy of the spec.
+            R->update_spec_from_imagebuf(s,m);
+        }
+    }
+
+    return 0;
+}
+
+
+
 static int
 action_selectmip (int argc, const char *argv[])
 {
@@ -1198,7 +1342,7 @@ action_pattern (int argc, const char *argv[])
                     fill[c] = atof (pattern.c_str()+numpos);
                     while (numpos < pattern.size() && pattern[numpos] != ':' && pattern[numpos] != ',')
                         ++numpos;
-                    if (pattern[numpos])
+                    if (numpos < pattern.size())
                         ++numpos;
                 }
             }
@@ -1462,6 +1606,59 @@ action_over (int argc, const char *argv[])
 
 
 static int
+action_fill (int argc, const char *argv[])
+{
+    if (ot.postpone_callback (1, action_fill, argc, argv))
+        return 0;
+
+    // Read and copy the top-of-stack image
+    ImageRecRef A (ot.pop());
+    ot.read (A);
+    ot.push (new ImageRec (*A, 0, 0, true, false));
+    ImageBuf &Rib ((*ot.curimg)(0,0));
+    const ImageSpec &Rspec = Rib.spec();
+    bool ok = ImageBufAlgo::zero (Rib);
+    if (! ok)
+        ot.error (argv[0], Rib.geterror());
+
+    int w = Rib.spec().width, h = Rib.spec().height;
+    int x = Rib.spec().x, y = Rib.spec().y;
+    if (! adjust_geometry (w, h, x, y, argv[1], true)) {
+        return 0;
+    }
+
+    float *color = ALLOCA (float, Rspec.nchannels);
+    for (int c = 0;  c < Rspec.nchannels;  ++c)
+        color[c] = 1.0f;
+
+    // Parse optional arguments for overrides
+    std::string command = argv[0];
+    size_t pos;
+    while ((pos = command.find_first_of(":")) != std::string::npos) {
+        command = command.substr (pos+1, std::string::npos);
+        if (Strutil::istarts_with(command,"color=")) {
+            // Parse comma-separated color list
+            size_t numpos = 6;
+            for (int c = 0; c < Rspec.nchannels && numpos < command.size() && command[numpos] != ':'; ++c) {
+                color[c] = atof (command.c_str()+numpos);
+                while (numpos < command.size() && command[numpos] != ':' && command[numpos] != ',')
+                    ++numpos;
+                if (numpos < command.size())
+                    ++numpos;
+            }
+        }
+    }
+
+    ok = ImageBufAlgo::fill (Rib, color, ROI(x, x+w, y, y+h));
+    if (! ok)
+        ot.error (argv[0], Rib.geterror());
+
+    return 0;
+}
+
+
+
+static int
 action_text (int argc, const char *argv[])
 {
     if (ot.postpone_callback (1, action_text, argc, argv))
@@ -1504,16 +1701,16 @@ action_text (int argc, const char *argv[])
                 textcolor[c] = atof (command.c_str()+numpos);
                 while (numpos < command.size() && command[numpos] != ':' && command[numpos] != ',')
                     ++numpos;
-                if (command[numpos])
+                if (numpos < command.size())
                     ++numpos;
             }
         } else if (Strutil::istarts_with(command,"font=")) {
             font = "";
-            int s = 5;
+            size_t s = 5;
             bool quote = (command[s] == '\"');
             if (quote)
                 ++s;
-            for ( ; command[s] && command[s] != ':' && command[s] != '\"'; ++s)
+            for ( ; s < command.size() && command[s] != ':' && command[s] != '\"'; ++s)
                 font += command[s];
         }
     }
@@ -1693,9 +1890,12 @@ getargs (int argc, char *argv[])
                 "--croptofull %@", action_croptofull, NULL, "Crop or pad to make pixel data region match the \"full\" region",
                 "--resize %@ %s", action_resize, NULL, "Resize (640x480, 50%)",
                 "--fixnan %@ %s", action_fixnan, NULL, "Fix NaN/Inf values in the image (options: none, black, box3)",
+                "--fill %@ %s", action_fill, NULL, "Fill a region (options: x=, y=, size=, color=)",
                 "--text %@ %s", action_text, NULL,
-                    "Render text into the current image",
+                    "Render text into the current image (options: x=, y=, size=, color=)",
                 "<SEPARATOR>", "Image stack manipulation:",
+                "--ch %@ %s", action_channels, NULL,
+                    "Select or shuffle channels (e.g., \"R,G,B\", \"B,G,R\", \"2,3,4\")",
                 "--unmip %@", action_unmip, NULL, "Discard all but the top level of a MIPmap",
                 "--selectmip %@ %d", action_selectmip, NULL,
                     "Select just one MIP level (0 = highest res)",

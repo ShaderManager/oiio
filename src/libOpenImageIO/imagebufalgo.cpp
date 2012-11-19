@@ -71,31 +71,33 @@ namespace
 
 template<typename T>
 static inline void
-zero_ (ImageBuf &buf)
+fill_ (ImageBuf &dst, const float *values, ROI roi=ROI())
 {
-    int chans = buf.nchannels();
-    for (ImageBuf::Iterator<T> pixel (buf);  pixel.valid();  ++pixel)
-        for (int i = 0;  i < chans;  ++i)
-            pixel[i] = 0;
+    int chbegin = roi.chbegin;
+    int chend = std::min (roi.chend, dst.nchannels());
+    for (ImageBuf::Iterator<T> p (dst, roi);  !p.done();  ++p)
+        for (int c = chbegin, i = 0;  c < chend;  ++c, ++i)
+            p[c] = values[i];
 }
 
 }
 
 bool
-ImageBufAlgo::zero (ImageBuf &dst)
+ImageBufAlgo::fill (ImageBuf &dst, const float *pixel, ROI roi)
 {
+    ASSERT (pixel && "fill must have a non-NULL pixel value pointer");
     switch (dst.spec().format.basetype) {
-    case TypeDesc::FLOAT : zero_<float> (dst); break;
-    case TypeDesc::UINT8 : zero_<unsigned char> (dst); break;
-    case TypeDesc::INT8  : zero_<char> (dst); break;
-    case TypeDesc::UINT16: zero_<unsigned short> (dst); break;
-    case TypeDesc::INT16 : zero_<short> (dst); break;
-    case TypeDesc::UINT  : zero_<unsigned int> (dst); break;
-    case TypeDesc::INT   : zero_<int> (dst); break;
-    case TypeDesc::UINT64: zero_<unsigned long long> (dst); break;
-    case TypeDesc::INT64 : zero_<long long> (dst); break;
-    case TypeDesc::HALF  : zero_<half> (dst); break;
-    case TypeDesc::DOUBLE: zero_<double> (dst); break;
+    case TypeDesc::FLOAT : fill_<float> (dst, pixel, roi); break;
+    case TypeDesc::UINT8 : fill_<unsigned char> (dst, pixel, roi); break;
+    case TypeDesc::UINT16: fill_<unsigned short> (dst, pixel, roi); break;
+    case TypeDesc::HALF  : fill_<half> (dst, pixel, roi); break;
+    case TypeDesc::INT8  : fill_<char> (dst, pixel, roi); break;
+    case TypeDesc::INT16 : fill_<short> (dst, pixel, roi); break;
+    case TypeDesc::UINT  : fill_<unsigned int> (dst, pixel, roi); break;
+    case TypeDesc::INT   : fill_<int> (dst, pixel, roi); break;
+    case TypeDesc::UINT64: fill_<unsigned long long> (dst, pixel, roi); break;
+    case TypeDesc::INT64 : fill_<long long> (dst, pixel, roi); break;
+    case TypeDesc::DOUBLE: fill_<double> (dst, pixel, roi); break;
     default:
         dst.error ("Unsupported pixel data format '%s'", dst.spec().format);
         return false;
@@ -106,43 +108,12 @@ ImageBufAlgo::zero (ImageBuf &dst)
 
 
 bool
-ImageBufAlgo::fill (ImageBuf &dst,
-                    const float *pixel)
+ImageBufAlgo::zero (ImageBuf &dst, ROI roi)
 {
-    // Walk through all data in our buffer. (i.e., crop or overscan)
-    // The display window is irrelevant
-    for (int k = dst.spec().z; k < dst.spec().z+dst.spec().depth; k++)
-        for (int j = dst.spec().y; j <  dst.spec().y+dst.spec().height; j++)
-            for (int i = dst.spec().x; i < dst.spec().x+dst.spec().width ; i++)
-                dst.setpixel (i, j, pixel);
-    
-    return true;
-}
-
-
-/// return true on success.
-bool
-ImageBufAlgo::fill (ImageBuf &dst,
-                    const float *pixel,
-                    int xbegin, int xend,
-                    int ybegin, int yend)
-{
-    return fill (dst, pixel, xbegin, xend, ybegin, yend, 0, 1);
-}
-
-
-bool
-ImageBufAlgo::fill (ImageBuf &dst,
-                    const float *pixel,
-                    int xbegin, int xend,
-                    int ybegin, int yend,
-                    int zbegin, int zend)
-{
-    for (int k = zbegin; k < zend; k++)
-        for (int j = ybegin; j < yend; j++)
-            for (int i = xbegin; i < xend; i++)
-                dst.setpixel (i, j, k, pixel);
-    return true;
+    int chans = std::min (dst.nchannels(), roi.nchannels());
+    float *zero = ALLOCA(float,chans);
+    memset (zero, 0, chans*sizeof(float));
+    return fill (dst, zero, roi);
 }
 
 
@@ -267,6 +238,87 @@ ImageBufAlgo::crop (ImageBuf &dst, const ImageBuf &src,
     return false;
 }
 
+
+
+
+bool
+ImageBufAlgo::channels (ImageBuf &dst, const ImageBuf &src,
+                        int nchannels, const int *channelorder,
+                        bool shuffle_channel_names)
+{
+    // Not intended to create 0-channel images.
+    if (nchannels <= 0) {
+        dst.error ("%d-channel images not supported", nchannels);
+        return false;
+    }
+    // If we dont have a single source channel,
+    // hard to know how big to make the additional channels
+    if (src.spec().nchannels == 0) {
+        dst.error ("%d-channel images not supported", src.spec().nchannels);
+        return false;
+    }
+
+    // If channelorder is NULL, it will be interpreted as
+    // {0, 1, ..., nchannels-1}.
+    int *local_channelorder = NULL;
+    if (! channelorder) {
+        local_channelorder = ALLOCA (int, nchannels);
+        for (int c = 0;  c < nchannels;  ++c)
+            local_channelorder[c] = c;
+        channelorder = local_channelorder;
+    }
+
+    // If this is the identity transformation, just do a simple copy
+    bool inorder = true;
+    for (int c = 0;  c < nchannels;   ++c)
+        inorder &= (channelorder[c] == c);
+    if (nchannels == src.spec().nchannels && inorder) {
+        return dst.copy (src);
+    }
+
+    // Construct a new ImageSpec that describes the desired channel ordering.
+    ImageSpec newspec = src.spec();
+    newspec.nchannels = nchannels;
+    newspec.default_channel_names ();
+    if (shuffle_channel_names) {
+        newspec.alpha_channel = -1;
+        newspec.z_channel = -1;
+        for (int c = 0; c < nchannels;  ++c) {
+            int csrc = channelorder[c];
+            if (csrc >= 0 && csrc < src.spec().nchannels) {
+                newspec.channelnames[c] = src.spec().channelnames[csrc];
+                if (csrc == src.spec().alpha_channel)
+                    newspec.alpha_channel = c;
+                if (csrc == src.spec().z_channel)
+                    newspec.z_channel = c;
+            }
+        }
+    }
+
+    // Update the image (realloc with the new spec)
+    dst.alloc (newspec);
+
+    // Copy the channels individually
+    stride_t dstxstride = AutoStride, dstystride = AutoStride, dstzstride = AutoStride;
+    ImageSpec::auto_stride (dstxstride, dstystride, dstzstride,
+                            newspec.format.size(), newspec.nchannels,
+                            newspec.width, newspec.height);
+    int channelsize = newspec.format.size();
+    char *pixels = (char *) dst.pixeladdr (dst.xbegin(), dst.ybegin(),
+                                           dst.zbegin());
+    for (int c = 0;  c < nchannels;  ++c) {
+        if (channelorder[c] >= 0 && channelorder[c] < src.spec().nchannels) {
+            int csrc = channelorder[c];
+            src.get_pixel_channels (src.xbegin(), src.xend(),
+                                    src.ybegin(), src.yend(),
+                                    src.zbegin(), src.zend(),
+                                    csrc, csrc+1, newspec.format, pixels,
+                                    dstxstride, dstystride, dstzstride);
+        }
+        pixels += channelsize;
+    }
+    return true;
+}
 
 
 
@@ -415,7 +467,7 @@ ImageBufAlgo::computePixelStats (PixelStats &stats, const ImageBuf &src)
         return false;
     }
 
-    if (src.spec().format != TypeDesc::FLOAT) {
+    if (src.spec().format != TypeDesc::FLOAT && ! src.deep()) {
         src.error ("only 'float' images are supported");
         return false;
     }
@@ -466,34 +518,57 @@ ImageBufAlgo::computePixelStats (PixelStats &stats, const ImageBuf &src)
         finitecount[i] = 0;
     }
     
-    ImageBuf::ConstIterator<float> s (src);
-    
-    float value = 0.0;
-    int c = 0;
-    
-    // Loop over all pixels ...
-    for ( ; s.valid();  ++s) {
-        for (c = 0;  c < nchannels;  ++c) {
-            value = s[c];
-            
-            if (isnan (value)) {
-                ++nancount[c];
+    if (src.deep()) {
+        // Loop over all pixels ...
+        for (ImageBuf::ConstIterator<float> s(src); s.valid();  ++s) {
+            int samples = s.deep_samples();
+            if (! samples)
                 continue;
+            for (int c = 0;  c < nchannels;  ++c) {
+                for (int i = 0;  i < samples;  ++i) {
+                    float value = s.deep_value (c, i);
+                    if (isnan (value)) {
+                        ++nancount[c];
+                        continue;
+                    }
+                    if (isinf (value)) {
+                        ++infcount[c];
+                        continue;
+                    }
+                    ++finitecount[c];
+                    tempsum[c] += value;
+                    tempsum2[c] += value*value;
+                    min[c] = std::min (value, min[c]);
+                    max[c] = std::max (value, max[c]);
+                    if ((finitecount[c] % PIXELS_PER_BATCH) == 0) {
+                        sum[c] += tempsum[c]; tempsum[c] = 0.0;
+                        sum2[c] += tempsum2[c]; tempsum2[c] = 0.0;
+                    }
+                }
             }
-            if (isinf (value)) {
-                ++infcount[c];
-                continue;
-            }
-            
-            ++finitecount[c];
-            tempsum[c] += value;
-            tempsum2[c] += value*value;
-            min[c] = std::min (value, min[c]);
-            max[c] = std::max (value, max[c]);
-            
-            if ((finitecount[c] % PIXELS_PER_BATCH) == 0) {
-                sum[c] += tempsum[c]; tempsum[c] = 0.0;
-                sum2[c] += tempsum2[c]; tempsum2[c] = 0.0;
+        }
+    } else {  // Non-deep case
+        // Loop over all pixels ...
+        for (ImageBuf::ConstIterator<float> s(src); s.valid();  ++s) {
+            for (int c = 0;  c < nchannels;  ++c) {
+                float value = s[c];
+                if (isnan (value)) {
+                    ++nancount[c];
+                    continue;
+                }
+                if (isinf (value)) {
+                    ++infcount[c];
+                    continue;
+                }
+                ++finitecount[c];
+                tempsum[c] += value;
+                tempsum2[c] += value*value;
+                min[c] = std::min (value, min[c]);
+                max[c] = std::max (value, max[c]);
+                if ((finitecount[c] % PIXELS_PER_BATCH) == 0) {
+                    sum[c] += tempsum[c]; tempsum[c] = 0.0;
+                    sum2[c] += tempsum2[c]; tempsum2[c] = 0.0;
+                }
             }
         }
     }
@@ -507,7 +582,7 @@ ImageBufAlgo::computePixelStats (PixelStats &stats, const ImageBuf &src)
     stats.infcount.resize (nchannels);
     stats.finitecount.resize (nchannels);
     
-    for (c = 0;  c < nchannels;  ++c) {
+    for (int c = 0;  c < nchannels;  ++c) {
         if (finitecount[c] == 0) {
             stats.min[c] = 0.0;
             stats.max[c] = 0.0;
@@ -536,11 +611,46 @@ ImageBufAlgo::computePixelStats (PixelStats &stats, const ImageBuf &src)
 
 
 
+template<class BUFT>
+inline void
+compare_value (ImageBuf::ConstIterator<BUFT,float> &a, int chan,
+               float aval, float bval, ImageBufAlgo::CompareResults &result,
+               float &maxval, double &batcherror, double &batch_sqrerror,
+               bool &failed, bool &warned, float failthresh, float warnthresh)
+{
+    maxval = std::max (maxval, std::max (aval, bval));
+    double f = fabs (aval - bval);
+    batcherror += f;
+    batch_sqrerror += f*f;
+    if (f > result.maxerror) {
+        result.maxerror = f;
+        result.maxx = a.x();
+        result.maxy = a.y();
+        result.maxz = 0;  // FIXME -- doesn't work for volume images
+        result.maxc = chan;
+    }
+    if (! warned && f > warnthresh) {
+        ++result.nwarn;
+        warned = true;
+    }
+    if (! failed && f > failthresh) {
+        ++result.nfail;
+        failed = true;
+    }
+}
+
+
+
 bool
 ImageBufAlgo::compare (const ImageBuf &A, const ImageBuf &B,
                        float failthresh, float warnthresh,
                        ImageBufAlgo::CompareResults &result)
 {
+    if (A.spec().format != TypeDesc::FLOAT &&
+        B.spec().format != TypeDesc::FLOAT) {
+        A.error ("ImageBufAlgo::compare only works on 'float' images.");
+        return false;
+    }
     int npels = A.spec().width * A.spec().height * A.spec().depth;
     int nvals = npels * A.spec().nchannels;
 
@@ -552,40 +662,37 @@ ImageBufAlgo::compare (const ImageBuf &A, const ImageBuf &B,
     result.maxx=0, result.maxy=0, result.maxz=0, result.maxc=0;
     result.nfail = 0, result.nwarn = 0;
     float maxval = 1.0;  // max possible value
-    ASSERT (A.spec().format == TypeDesc::FLOAT &&
-            B.spec().format == TypeDesc::FLOAT);
     ImageBuf::ConstIterator<float,float> a (A);
     ImageBuf::ConstIterator<float,float> b (B);
+    bool deep = A.deep();
+    if (B.deep() != A.deep())
+        return false;
     // Break up into batches to reduce cancelation errors as the error
     // sums become too much larger than the error for individual pixels.
     const int batchsize = 4096;   // As good a guess as any
     for ( ;  a.valid();  ) {
         double batcherror = 0;
         double batch_sqrerror = 0;
-        for (int i = 0;  i < batchsize && a.valid();  ++i, ++a) {
-            b.pos (a.x(), a.y());  // ensure alignment
-            bool warned = false, failed = false;  // For this pixel
-            for (int c = 0;  c < A.spec().nchannels;  ++c) {
-                float aval = a[c], bval = b[c];
-                maxval = std::max (maxval, std::max (aval, bval));
-                double f = fabs (aval - bval);
-                batcherror += f;
-                batch_sqrerror += f*f;
-                if (f > result.maxerror) {
-                    result.maxerror = f;
-                    result.maxx = a.x();
-                    result.maxy = a.y();
-                    result.maxz = 0;  // FIXME -- doesn't work for volume images
-                    result.maxc = c;
-                }
-                if (! warned && f > warnthresh) {
-                    ++result.nwarn;
-                    warned = true;
-                }
-                if (! failed && f > failthresh) {
-                    ++result.nfail;
-                    failed = true;
-                }
+        if (deep) {
+            for (int i = 0;  i < batchsize && a.valid();  ++i, ++a) {
+                b.pos (a.x(), a.y());  // ensure alignment
+                bool warned = false, failed = false;  // For this pixel
+                for (int c = 0;  c < A.spec().nchannels;  ++c)
+                    for (int s = 0, e = a.deep_samples(); s < e;  ++s) {
+                        compare_value (a, c, a.deep_value(c,s),
+                                       b.deep_value(c,s), result, maxval,
+                                       batcherror, batch_sqrerror,
+                                       failed, warned, failthresh, warnthresh);
+                    }
+            }
+        } else {  // non-deep
+            for (int i = 0;  i < batchsize && a.valid();  ++i, ++a) {
+                b.pos (a.x(), a.y());  // ensure alignment
+                bool warned = false, failed = false;  // For this pixel
+                for (int c = 0;  c < A.spec().nchannels;  ++c)
+                    compare_value (a, c, a[c], b[c], result, maxval,
+                                   batcherror, batch_sqrerror,
+                                   failed, warned, failthresh, warnthresh);
             }
         }
         totalerror += batcherror;
@@ -1307,9 +1414,8 @@ ImageBufAlgo::over (ImageBuf &R, const ImageBuf &A, const ImageBuf &B, ROI roi,
     }
 
     // Specified ROI -> use it. Unspecified ROI -> initialize from R.
-    if (! roi.defined) {
+    if (! roi.defined())
         roi = get_roi (R.spec());
-    }    
 
     parallel_image (boost::bind (over_impl<float,float,float>, boost::ref(R),
                                  boost::cref(A), boost::cref(B), _1),
@@ -1363,11 +1469,12 @@ ImageBufAlgo::render_text (ImageBuf &R, int x, int y, const std::string &text,
 
     // A set of likely directories for fonts to live, across several systems.
     std::vector<std::string> search_dirs;
-    std::string home = getenv ("HOME");
-    if (! home.empty()) {
-        search_dirs.push_back (home + "/fonts");
-        search_dirs.push_back (home + "/Fonts");
-        search_dirs.push_back (home + "/Library/Fonts");
+    const char *home = getenv ("HOME");
+    if (home && *home) {
+        std::string h (home);
+        search_dirs.push_back (h + "/fonts");
+        search_dirs.push_back (h + "/Fonts");
+        search_dirs.push_back (h + "/Library/Fonts");
     }
     search_dirs.push_back ("/usr/share/fonts");
     search_dirs.push_back ("/Library/Fonts");
@@ -1538,7 +1645,7 @@ ImageBufAlgo::histogram (const ImageBuf &A, int channel,
     }
 
     // Specified ROI -> use it. Unspecified ROI -> initialize from A.
-    if (! roi.defined)
+    if (! roi.defined())
         roi = get_roi (A.spec());
 
     histogram_impl<float> (A, channel, histogram, bins, min, max,

@@ -60,50 +60,61 @@ class ImageBuf;
 /// The region is [xbegin,xend) x [begin,yend) x [zbegin,zend),
 /// with the "end" designators signifying one past the last pixel,
 /// a la STL style.
-struct DLLPUBLIC ROI {
+struct ROI {
     int xbegin, xend, ybegin, yend, zbegin, zend;
-    bool defined;
+    int chbegin, chend;
 
     /// Default constructor is an undefined region.
     ///
-    ROI () : defined(false) { }
+    ROI () : xbegin(0), xend(-1), chbegin(0), chend(1000) { }
 
     /// Constructor with an explicitly defined region.
     ///
-    ROI (int xbegin, int xend, int ybegin, int yend, int zbegin=0, int zend=1)
+    ROI (int xbegin, int xend, int ybegin, int yend,
+         int zbegin=0, int zend=1, int chbegin=0, int chend=10000)
         : xbegin(xbegin), xend(xend), ybegin(ybegin), yend(yend),
-          zbegin(zbegin), zend(zend), defined(true)
+          zbegin(zbegin), zend(zend), chbegin(chbegin), chend(chend)
     { }
+
+    /// Is a region defined?
+    bool defined () const { return (xbegin <= xend); }
 
     // Region dimensions.
     int width () const { return xend - xbegin; }
     int height () const { return yend - ybegin; }
     int depth () const { return zend - zbegin; }
+    int nchannels () const { return chend - chbegin; }
+
     /// Total number of pixels in the region.
     imagesize_t npixels () const {
+        if (! defined())
+            return 0;
         imagesize_t w = width(), h = height(), d = depth();
         return w*h*d;
     }
+
 };
 
 
 /// Union of two regions, the smallest region containing both.
-DLLPUBLIC ROI roi_union (const ROI &A, const ROI &B);
+OIIO_API ROI roi_union (const ROI &A, const ROI &B);
 
 /// Intersection of two regions.
-DLLPUBLIC ROI roi_intersection (const ROI &A, const ROI &B);
+OIIO_API ROI roi_intersection (const ROI &A, const ROI &B);
 
 /// Return pixel data window for this ImageSpec as a ROI.
-DLLPUBLIC ROI get_roi (const ImageSpec &spec);
+OIIO_API ROI get_roi (const ImageSpec &spec);
 
 /// Return full/display window for this ImageSpec as a ROI.
-DLLPUBLIC ROI get_roi_full (const ImageSpec &spec);
+OIIO_API ROI get_roi_full (const ImageSpec &spec);
 
 /// Set pixel data window for this ImageSpec to a ROI.
-DLLPUBLIC void set_roi (ImageSpec &spec, const ROI &newroi);
+/// Does NOT change the channels of the spec, regardless of newroi.
+OIIO_API void set_roi (ImageSpec &spec, const ROI &newroi);
 
 /// Set full/display window for this ImageSpec to a ROI.
-DLLPUBLIC void set_roi_full (ImageSpec &spec, const ROI &newroi);
+/// Does NOT change the channels of the spec, regardless of newroi.
+OIIO_API void set_roi_full (ImageSpec &spec, const ROI &newroi);
 
 
 
@@ -112,7 +123,7 @@ DLLPUBLIC void set_roi_full (ImageSpec &spec, const ROI &newroi);
 /// simple routines for setting and getting individual pixels, that
 /// hides most of the details of memory layout and data representation
 /// (translating to/from float automatically).
-class DLLPUBLIC ImageBuf {
+class OIIO_API ImageBuf {
 public:
     /// Construct an ImageBuf to read the named image.  
     /// If name is the empty string (the default), it's a completely
@@ -354,45 +365,60 @@ public:
     /// [ybegin..yend), channels [chbegin,chend) (all with exclusive
     /// 'end'), specified as integer pixel coordinates, at the current
     /// MIP-map level, storing the pixel values beginning at the address
-    /// specified by result.  It is up to the caller to ensure that
-    /// result points to an area of memory big enough to accommodate the
-    /// requested rectangle.  Return true if the operation could be
-    /// completed, otherwise return false.
-    bool get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
-                             int zbegin, int zend, int chbegin, int chend,
-                             TypeDesc format, void *result) const;
-
-    /// Retrieve the rectangle of pixels spanning [xbegin..xend) X
-    /// [ybegin..yend) (with exclusive 'end'), specified as integer
-    /// pixel coordinates, at the current MIP-map level, storing the
-    /// pixel values beginning at the address specified by result.  It
-    /// is up to the caller to ensure that result points to an area of
+    /// specified by result and with the given strides (by default,
+    /// AutoStride means the usual contiguous packing of pixels).  It is
+    /// up to the caller to ensure that result points to an area of
     /// memory big enough to accommodate the requested rectangle.
     /// Return true if the operation could be completed, otherwise
     /// return false.
-    bool get_pixels (int xbegin, int xend, int ybegin, int yend,
-                      int zbegin, int zend,
-                      TypeDesc format, void *result) const;
+    bool get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
+                             int zbegin, int zend, int chbegin, int chend,
+                             TypeDesc format, void *result,
+                             stride_t xstride=AutoStride,
+                             stride_t ystride=AutoStride,
+                             stride_t zstride=AutoStride) const;
 
     /// Retrieve the rectangle of pixels spanning [xbegin..xend) X
     /// [ybegin..yend) (with exclusive 'end'), specified as integer
     /// pixel coordinates, at the current MIP-map level, storing the
-    /// pixel values beginning at the address specified by result,
-    /// converting to the type <T> in the process.  It is up to the
-    /// caller to ensure that result points to an area of memory big
-    /// enough to accommodate the requested rectangle.  Return true if
-    /// the operation could be completed, otherwise return false.
+    /// pixel values beginning at the address specified by result and
+    /// with the given strides (by default, AutoStride means the usual
+    /// contiguous packing of pixels).  It is up to the caller to ensure
+    /// that result points to an area of memory big enough to
+    /// accommodate the requested rectangle.  Return true if the
+    /// operation could be completed, otherwise return false.
+    bool get_pixels (int xbegin, int xend, int ybegin, int yend,
+                     int zbegin, int zend, TypeDesc format,
+                     void *result, stride_t xstride=AutoStride,
+                     stride_t ystride=AutoStride,
+                     stride_t zstride=AutoStride) const;
+
+    /// Retrieve the rectangle of pixels spanning [xbegin..xend) X
+    /// [ybegin..yend) (with exclusive 'end'), specified as integer
+    /// pixel coordinates, at the current MIP-map level, storing the
+    /// pixel values beginning at the address specified by result and
+    /// with the given strides (by default, AutoStride means the usual
+    /// contiguous packing of pixels), converting to the type <T> in the
+    /// process.  It is up to the caller to ensure that result points to
+    /// an area of memory big enough to accommodate the requested
+    /// rectangle.  Return true if the operation could be completed,
+    /// otherwise return false.
     template<typename T>
     bool get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
                              int zbegin, int zend, int chbegin, int chend,
-                             T *result) const;
+                             T *result, stride_t xstride=AutoStride,
+                             stride_t ystride=AutoStride,
+                             stride_t zstride=AutoStride) const;
 
     template<typename T>
     bool get_pixels (int xbegin, int xend, int ybegin, int yend,
-                     int zbegin, int zend, T *result) const
+                     int zbegin, int zend, T *result,
+                     stride_t xstride=AutoStride, stride_t ystride=AutoStride,
+                     stride_t zstride=AutoStride) const
     {
         return get_pixel_channels (xbegin, xend, ybegin, yend, zbegin, zend,
-                                   0, nchannels(), result);
+                                   0, nchannels(), result,
+                                   xstride, ystride, zstride);
     }
 
     /// Even safer version of get_pixels: Retrieve the rectangle of
@@ -410,6 +436,22 @@ public:
         return get_pixels (xbegin_, xend_, ybegin_, yend_, zbegin_, zend_,
                            &result[0]);
     }
+
+    /// Retrieve the number of deep data samples corresponding to pixel
+    /// (x,y,z).  Return 0 not a deep image or if the pixel is out of
+    /// range or has no deep samples.
+    int deep_samples (int x, int y, int z=0) const;
+
+    /// Return a pointer to the raw array of deep data samples for
+    /// channel c of pixel (x,y,z).  Return NULL if not a deep image or
+    /// if the pixel is out of range or has no deep samples.
+    const void *deep_pixel_ptr (int x, int y, int z, int c) const;
+
+    /// Return the value (as a float) of sample s of channel c of pixel
+    /// (x,y,z).  Return 0.0 if not a deep image or if the pixel
+    /// coordinates or channel number are out of range or if it has no
+    /// deep samples.
+    float deep_value (int x, int y, int z, int c, int s) const;
 
     int orientation () const { return m_orientation; }
 
@@ -512,6 +554,13 @@ public:
     /// aren't local.
     void *pixeladdr (int x, int y, int z);
 
+    /// Does this ImageBuf store deep data?
+    bool deep () const { return m_spec.deep; }
+
+    /// Retrieve the "deep" data.
+    DeepData *deepdata () { return deep() ? &m_deepdata : NULL; }
+    const DeepData *deepdata () const { return deep() ? &m_deepdata : NULL; }
+
     /// Is this ImageBuf object initialized?
     bool initialized () const { return m_spec_valid || m_pixels_valid; }
 
@@ -576,12 +625,16 @@ public:
             : m_ib(&ib), m_tile(NULL)
         {
             init_ib ();
-            m_rng_xbegin = std::max (roi.xbegin, m_img_xbegin);
-            m_rng_xend   = std::min (roi.xend,   m_img_xend);
-            m_rng_ybegin = std::max (roi.ybegin, m_img_ybegin);
-            m_rng_yend   = std::min (roi.yend,   m_img_yend);
-            m_rng_zbegin = std::max (roi.zbegin, m_img_zbegin);
-            m_rng_zend   = std::min (roi.zend,   m_img_zend);
+            if (roi.defined()) {
+                m_rng_xbegin = std::max (roi.xbegin, m_img_xbegin);
+                m_rng_xend   = std::min (roi.xend,   m_img_xend);
+                m_rng_ybegin = std::max (roi.ybegin, m_img_ybegin);
+                m_rng_yend   = std::min (roi.yend,   m_img_yend);
+                m_rng_zbegin = std::max (roi.zbegin, m_img_zbegin);
+                m_rng_zend   = std::min (roi.zend,   m_img_zend);
+            } else {
+                range_is_image ();
+            }
             pos (m_rng_xbegin, m_rng_ybegin, m_rng_zbegin);
         }
         /// Construct from an ImageBuf and designated region -- iterate
@@ -637,7 +690,7 @@ public:
         void pos (int x_, int y_, int z_=0) {
             bool v = valid(x_,y_,z_);
             bool e = exists(x_,y_,z_);
-            if (! e)
+            if (! e || m_deep)
                 m_proxy.set (NULL);
             else if (m_ib->localpixels())
                 m_proxy.set ((BUFT *)m_ib->pixeladdr (x_, y_, z_));
@@ -755,6 +808,14 @@ public:
 
         void * rawptr () const { return m_proxy.get(); }
 
+        /// Retrieve the number of deep data samples at this pixel.
+        int deep_samples () { return m_ib->deep_samples (m_x, m_y, m_z); }
+
+        /// Retrieve the deep data value of sample s of channel c.
+        USERT deep_value (int c, int s) const {
+            return convert_type<float,USERT>(m_ib->deep_value (m_x, m_y, m_z, c, s));
+        }
+
     private:
         ImageBuf *m_ib;
         bool m_valid, m_exists;
@@ -769,6 +830,7 @@ public:
         ImageCache::Tile *m_tile;
         int m_tilexbegin, m_tileybegin, m_tilezbegin;
         int m_nchannels, m_tilewidth;
+        bool m_deep;
 
         // Helper called by ctrs -- set up some locally cached values
         // that are copied or derived from the ImageBuf.
@@ -778,6 +840,7 @@ public:
             m_img_zbegin = m_ib->zbegin(); m_img_zend = m_ib->zend();
             m_nchannels = m_ib->spec().nchannels;
             m_tilewidth = m_ib->spec().tile_width;
+            m_deep = m_ib->deep();
         }
 
         // Helper called by ctrs -- make the iteration range the full
@@ -797,6 +860,8 @@ public:
             if (m_x >= m_img_xend /*same as !exists() for this case*/) {
                 m_proxy.set (NULL);
                 m_exists = false;
+            } else if (m_deep) {
+                m_proxy.set (NULL);
             } else if (m_ib->localpixels()) {
                 m_proxy += m_nchannels;
             } else if (m_x < m_tilexbegin+m_tilewidth) {
@@ -855,12 +920,16 @@ public:
             : m_ib(&ib), m_tile(NULL)
         {
             init_ib ();
-            m_rng_xbegin = std::max (roi.xbegin, m_img_xbegin);
-            m_rng_xend   = std::min (roi.xend,   m_img_xend);
-            m_rng_ybegin = std::max (roi.ybegin, m_img_ybegin);
-            m_rng_yend   = std::min (roi.yend,   m_img_yend);
-            m_rng_zbegin = std::max (roi.zbegin, m_img_zbegin);
-            m_rng_zend   = std::min (roi.zend,   m_img_zend);
+            if (roi.defined()) {
+                m_rng_xbegin = std::max (roi.xbegin, m_img_xbegin);
+                m_rng_xend   = std::min (roi.xend,   m_img_xend);
+                m_rng_ybegin = std::max (roi.ybegin, m_img_ybegin);
+                m_rng_yend   = std::min (roi.yend,   m_img_yend);
+                m_rng_zbegin = std::max (roi.zbegin, m_img_zbegin);
+                m_rng_zend   = std::min (roi.zend,   m_img_zend);
+            } else {
+                range_is_image ();
+            }
             pos (m_rng_xbegin, m_rng_ybegin, m_rng_zbegin);
         }
         /// Construct from an ImageBuf and designated region -- iterate
@@ -916,7 +985,7 @@ public:
         void pos (int x_, int y_, int z_=0) {
             bool v = valid(x_,y_,z_);
             bool e = exists(x_,y_,z_);
-            if (! e)
+            if (! e || m_deep)
                 m_proxy.set (NULL);
             else if (m_ib->localpixels())
                 m_proxy.set ((BUFT *)m_ib->pixeladdr (x_, y_, z_));
@@ -1029,6 +1098,14 @@ public:
 
         const void * rawptr () const { return m_proxy.get(); }
 
+        /// Retrieve the number of deep data samples at this pixel.
+        int deep_samples () { return m_ib->deep_samples (m_x, m_y, m_z); }
+
+        /// Retrieve the deep data value of sample s of channel c.
+        USERT deep_value (int c, int s) const {
+            return convert_type<float,USERT>(m_ib->deep_value (m_x, m_y, m_z, c, s));
+        }
+
     private:
         const ImageBuf *m_ib;
         bool m_valid, m_exists;
@@ -1043,6 +1120,7 @@ public:
         ImageCache::Tile *m_tile;
         int m_tilexbegin, m_tileybegin, m_tilezbegin;
         int m_nchannels, m_tilewidth;
+        bool m_deep;
 
         // Helper called by ctrs -- set up some locally cached values
         // that are copied or derived from the ImageBuf.
@@ -1052,6 +1130,7 @@ public:
             m_img_zbegin = m_ib->zbegin(); m_img_zend = m_ib->zend();
             m_nchannels = m_ib->spec().nchannels;
             m_tilewidth = m_ib->spec().tile_width;
+            m_deep = m_ib->deep();
         }
 
         // Helper called by ctrs -- make the iteration range the full
@@ -1071,6 +1150,8 @@ public:
             if (m_x >= m_img_xend /*same as !exists() for this case*/) {
                 m_proxy.set (NULL);
                 m_exists = false;
+            } else if (m_deep) {
+                m_proxy.set (NULL);
             } else if (m_ib->localpixels()) {
                 m_proxy += m_nchannels;
             } else if (m_x < m_tilexbegin+m_tilewidth) {
@@ -1104,6 +1185,7 @@ protected:
     float m_pixelaspect;         ///< Pixel aspect ratio of the image
     ImageCache *m_imagecache;    ///< ImageCache to use
     TypeDesc m_cachedpixeltype;  ///< Data type stored in the cache
+    DeepData m_deepdata;         ///< Deep data
 
     // Resize the local owned buffer to the size indicated by the
     // ImageBuf's spec.

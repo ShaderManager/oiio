@@ -57,7 +57,8 @@ get_roi (const ImageSpec &spec)
 {
     return ROI (spec.x, spec.x + spec.width,
                 spec.y, spec.y + spec.height,
-                spec.z, spec.z + spec.depth);
+                spec.z, spec.z + spec.depth,
+                0, spec.nchannels);
 }
 
 
@@ -67,7 +68,8 @@ get_roi_full (const ImageSpec &spec)
 {
     return ROI (spec.full_x, spec.full_x + spec.full_width,
                 spec.full_y, spec.full_y + spec.full_height,
-                spec.full_z, spec.full_z + spec.full_depth);
+                spec.full_z, spec.full_z + spec.full_depth,
+                0, spec.nchannels);
 }
 
 
@@ -103,7 +105,8 @@ roi_union (const ROI &A, const ROI &B)
 {
     return ROI (std::min (A.xbegin, B.xbegin), std::max (A.xend, B.xend),
                 std::min (A.ybegin, B.ybegin), std::max (A.yend, B.yend),
-                std::min (A.zbegin, B.zbegin), std::max (A.zend, B.zend));
+                std::min (A.zbegin, B.zbegin), std::max (A.zend, B.zend),
+                std::min (A.chbegin, B.chbegin), std::max (A.chend, B.chend));
 }
 
 
@@ -113,7 +116,8 @@ roi_intersection (const ROI &A, const ROI &B)
 {
     return ROI (std::max (A.xbegin, B.xbegin), std::min (A.xend, B.xend),
                 std::max (A.ybegin, B.ybegin), std::min (A.yend, B.yend),
-                std::max (A.zbegin, B.zbegin), std::min (A.zend, B.zend));
+                std::max (A.zbegin, B.zbegin), std::min (A.zend, B.zend),
+                std::max (A.chbegin, B.chbegin), std::min (A.chend, B.chend));
 }
 
 
@@ -178,7 +182,8 @@ ImageBuf::ImageBuf (const ImageBuf &src)
       m_orientation(src.m_orientation),
       m_pixelaspect(src.m_pixelaspect),
       m_imagecache(src.m_imagecache),
-      m_cachedpixeltype(src.m_cachedpixeltype)
+      m_cachedpixeltype(src.m_cachedpixeltype),
+      m_deepdata(src.m_deepdata)
 {
     if (src.localpixels()) {
         // Source had the image fully in memory (no cache)
@@ -191,7 +196,7 @@ ImageBuf::ImageBuf (const ImageBuf &src)
             m_localpixels = &m_pixels[0];
         }
     } else {
-        // Source was cache-based
+        // Source was cache-based or deep
         // nothing else to do
     }
 }
@@ -302,10 +307,7 @@ ImageBuf::clear ()
     m_current_miplevel = -1;
     m_spec = ImageSpec ();
     m_nativespec = ImageSpec ();
-    {
-        std::vector<char> tmp;
-        std::swap (m_pixels, tmp);  // clear it with deallocation
-    }
+    std::vector<char>().swap (m_pixels);  // clear it with deallocation
     m_localpixels = NULL;
     m_clientpixels = false;
     m_spec_valid = false;
@@ -313,6 +315,7 @@ ImageBuf::clear ()
     m_badfile = false;
     m_orientation = 1;
     m_pixelaspect = 1;
+    m_deepdata.free ();
 }
 
 
@@ -343,7 +346,7 @@ ImageBuf::reset (const std::string &filename, const ImageSpec &spec)
 void
 ImageBuf::realloc ()
 {
-    size_t newsize = spec().image_bytes ();
+    size_t newsize = spec().deep ? size_t(0) : spec().image_bytes ();
     if (((int)m_pixels.size() - (int)newsize) > 4*1024*1024) {
         // If we are substantially shrinking, try to actually free
         // memory, which std::vector::resize does not do!
@@ -352,7 +355,7 @@ ImageBuf::realloc ()
         // As tmp leaves scope, it frees m_pixels's old memory
     }
     m_pixels.resize (newsize);
-    m_localpixels = &m_pixels[0];
+    m_localpixels = newsize ? &m_pixels[0] : NULL;
     m_clientpixels = false;
 #if 0
     std::cerr << "ImageBuf " << m_name << " local allocation: " << newsize << "\n";
@@ -382,8 +385,11 @@ ImageBuf::copy_from (const ImageBuf &src)
             m_spec.depth == src.m_spec.depth &&
             m_spec.nchannels == src.m_spec.nchannels);
     realloc ();
-    src.get_pixels (src.xbegin(), src.xend(), src.ybegin(), src.yend(),
-                    src.zbegin(), src.zend(), m_spec.format, m_localpixels);
+    if (m_spec.deep)
+        m_deepdata = src.m_deepdata;
+    else
+        src.get_pixels (src.xbegin(), src.xend(), src.ybegin(), src.yend(),
+                        src.zbegin(), src.zend(), m_spec.format, m_localpixels);
 }
 
 
@@ -455,7 +461,25 @@ ImageBuf::read (int subimage, int miplevel, bool force, TypeDesc convert,
     m_current_subimage = subimage;
     m_current_miplevel = miplevel;
 
-#if 1
+    if (m_spec.deep) {
+        boost::scoped_ptr<ImageInput> input (ImageInput::open (m_name.string()));
+        if (! input) {
+            error ("%s", OIIO::geterror());
+            return false;
+        }
+        ImageSpec dummyspec;
+        if (! input->seek_subimage (subimage, miplevel, dummyspec)) {
+            error ("%s", input->geterror());
+            return false;
+        }
+        if (! input->read_native_deep_image (m_deepdata)) {
+            error ("%s", input->geterror());
+            return false;
+        }
+        m_spec = m_nativespec;   // Deep images always use native data
+        return true;
+    }
+
     // If we don't already have "local" pixels, and we aren't asking to
     // convert the pixels to a specific (and different) type, then take an
     // early out by relying on the cache.
@@ -476,8 +500,7 @@ ImageBuf::read (int subimage, int miplevel, bool force, TypeDesc convert,
         std::cerr << "going to have to read " << m_name << ": "
                   << m_spec.format.c_str() << " vs " << convert.c_str() << "\n";
 #endif
-    }        
-#endif
+    }
 
     if (convert != TypeDesc::UNKNOWN)
         m_spec.format = convert;
@@ -493,7 +516,7 @@ ImageBuf::read (int subimage, int miplevel, bool force, TypeDesc convert,
         m_pixels_valid = true;
     } else {
         m_pixels_valid = false;
-        m_err = m_imagecache->geterror ();
+        error ("%s", m_imagecache->geterror ());
     }
 
     return m_pixels_valid;
@@ -509,9 +532,14 @@ ImageBuf::write (ImageOutput *out,
     stride_t as = AutoStride;
     bool ok = true;
     if (m_localpixels) {
+        // In-core pixel buffer for the whole image
         ok = out->write_image (m_spec.format, m_localpixels, as, as, as,
                                progress_callback, progress_callback_data);
+    } else if (deep()) {
+        // Deep image record
+        ok = out->write_deep_image (m_deepdata);
     } else {
+        // Backed by ImageCache
         std::vector<char> tmp (m_spec.image_bytes());
         get_pixels (xbegin(), xend(), ybegin(), yend(), zbegin(), zend(),
                     m_spec.format, &tmp[0]);
@@ -521,7 +549,7 @@ ImageBuf::write (ImageOutput *out,
         // little bits at a time (scanline or tile blocks).
     }
     if (! ok)
-        m_err = out->geterror ();
+        error ("%s", out->geterror ());
     return ok;
 }
 
@@ -536,11 +564,11 @@ ImageBuf::save (const std::string &_filename, const std::string &_fileformat,
     std::string fileformat = _fileformat.size() ? _fileformat : filename;
     boost::scoped_ptr<ImageOutput> out (ImageOutput::create (fileformat.c_str(), "" /* searchpath */));
     if (! out) {
-        m_err = geterror();
+        error ("%s", geterror());
         return false;
     }
     if (! out->open (filename.c_str(), m_spec)) {
-        m_err = out->geterror ();
+        error ("%s", out->geterror());
         return false;
     }
     if (! write (out.get(), progress_callback, progress_callback_data))
@@ -943,16 +971,19 @@ template<typename S, typename D>
 static inline void 
 get_pixel_channels_ (const ImageBuf &buf, int xbegin, int xend,
                      int ybegin, int yend, int zbegin, int zend, 
-                     int chbegin, int chend, D *r)
+                     int chbegin, int chend, D *r,
+                     stride_t xstride, stride_t ystride, stride_t zstride)
 {
     int w = (xend-xbegin), h = (yend-ybegin);
-    imagesize_t wh = imagesize_t(w) * imagesize_t(h);
     int nchans = chend - chbegin;
+    ImageSpec::auto_stride (xstride, ystride, zstride, sizeof(D), nchans, w, h);
     for (ImageBuf::ConstIterator<S,D> p (buf, xbegin, xend, ybegin, yend, zbegin, zend);
-         p.valid(); ++p) { 
-        imagesize_t offset = ((p.z()-zbegin)*wh + (p.y()-ybegin)*w + (p.x()-xbegin)) * buf.nchannels();
+         !p.done(); ++p) {
+        imagesize_t offset = (p.z()-zbegin)*zstride + (p.y()-ybegin)*ystride
+                           + (p.x()-xbegin)*xstride;
+        D *rc = (D *)((char *)r + offset);
         for (int c = 0;  c < nchans;  ++c)
-            r[offset+c] = p[c+chbegin];
+            rc[c] = p[c+chbegin];
     }
 }
 
@@ -962,7 +993,9 @@ template<typename D>
 bool
 ImageBuf::get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
                               int zbegin, int zend,
-                              int chbegin, int chend, D *r) const
+                              int chbegin, int chend, D *r,
+                              stride_t xstride, stride_t ystride,
+                              stride_t zstride) const
 {
     // Caveat: serious hack here.  To avoid duplicating code, use a
     // #define.  Furthermore, exploit the CType<> template to construct
@@ -970,7 +1003,8 @@ ImageBuf::get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
 #define TYPECASE(B)                                                     \
     case B : get_pixel_channels_<CType<B>::type,D>(*this,               \
                        xbegin, xend, ybegin, yend, zbegin, zend,        \
-                       chbegin, chend, (D *)r); return true
+                       chbegin, chend, (D *)r, xstride, ystride, zstride); \
+             return true
     
     switch (spec().format.basetype) {
         TYPECASE (TypeDesc::UINT8);
@@ -994,14 +1028,17 @@ ImageBuf::get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
 bool
 ImageBuf::get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
                               int zbegin, int zend, int chbegin, int chend,
-                              TypeDesc format, void *result) const
+                              TypeDesc format, void *result,
+                              stride_t xstride, stride_t ystride,
+                              stride_t zstride) const
 {
     // For each possible base type that the user wants for a destination
     // type, call a template specialization.
 #define TYPECASE(B)                                                     \
     case B : return get_pixel_channels<CType<B>::type> (                \
                              xbegin, xend, ybegin, yend, zbegin, zend,  \
-                             chbegin, chend, (CType<B>::type *)result);
+                             chbegin, chend, (CType<B>::type *)result,  \
+                             xstride, ystride, zstride)
 
     switch (format.basetype) {
         TYPECASE (TypeDesc::UINT8);
@@ -1024,11 +1061,92 @@ ImageBuf::get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
 
 bool
 ImageBuf::get_pixels (int xbegin, int xend, int ybegin, int yend,
-                       int zbegin, int zend,
-                       TypeDesc format, void *result) const
+                      int zbegin, int zend, TypeDesc format, void *result,
+                      stride_t xstride, stride_t ystride,
+                      stride_t zstride) const
 {
     return get_pixel_channels (xbegin, xend, ybegin, yend, zbegin, zend,
-                               0, nchannels(), format, result);
+                               0, nchannels(), format, result,
+                               xstride, ystride, zstride);
+}
+
+
+
+int
+ImageBuf::deep_samples (int x, int y, int z) const
+{
+    if (! deep())
+        return 0;
+    if (x < m_spec.x || y < m_spec.y || z < m_spec.z)
+        return 0;
+    x -= m_spec.x;  y -= m_spec.y;  z -= m_spec.z;
+    if (x >= m_spec.width || y >= m_spec.height || z >= m_spec.depth)
+        return 0;
+    int p = (z * m_spec.height + y) * m_spec.width  + x;
+    return m_deepdata.nsamples[p];
+}
+
+
+
+const void *
+ImageBuf::deep_pixel_ptr (int x, int y, int z, int c) const
+{
+    if (! deep())
+        return NULL;
+    if (x < m_spec.x || y < m_spec.y || z < m_spec.z)
+        return NULL;
+    x -= m_spec.x;  y -= m_spec.y;  z -= m_spec.z;
+    if (x >= m_spec.width || y >= m_spec.height || z >= m_spec.depth ||
+        c < 0 || c >= m_spec.nchannels)
+        return NULL;
+    int p = (z * m_spec.height + y) * m_spec.width  + x;
+    return m_deepdata.nsamples[p] ? m_deepdata.pointers[p*m_spec.nchannels] : NULL;
+}
+
+
+
+float
+ImageBuf::deep_value (int x, int y, int z, int c, int s) const
+{
+    if (! deep())
+        return 0.0f;
+    if (x < m_spec.x || y < m_spec.y || z < m_spec.z)
+        return 0.0f;
+    x -= m_spec.x;  y -= m_spec.y;  z -= m_spec.z;
+    if (x >= m_spec.width || y >= m_spec.height || z >= m_spec.depth ||
+        c < 0 || c >= m_spec.nchannels)
+        return 0.0f;
+    int p = (z * m_spec.height + y) * m_spec.width + x;
+    int nsamps = m_deepdata.nsamples[p];
+    if (s >= nsamps)
+        return 0.0f;
+    const void *ptr = m_deepdata.pointers[p*m_spec.nchannels+c];
+    TypeDesc t = m_spec.channelformat(c);
+    switch (t.basetype) {
+    case TypeDesc::FLOAT :
+        return ((const float *)ptr)[s];
+    case TypeDesc::HALF  :
+        return ((const half *)ptr)[s];
+    case TypeDesc::UINT8 :
+        return ConstDataArrayProxy<unsigned char,float>((const unsigned char *)ptr)[s];
+    case TypeDesc::INT8  :
+        return ConstDataArrayProxy<char,float>((const char *)ptr)[s];
+    case TypeDesc::UINT16:
+        return ConstDataArrayProxy<unsigned short,float>((const unsigned short *)ptr)[s];
+    case TypeDesc::INT16 :
+        return ConstDataArrayProxy<short,float>((const short *)ptr)[s];
+    case TypeDesc::UINT  :
+        return ConstDataArrayProxy<unsigned int,float>((const unsigned int *)ptr)[s];
+    case TypeDesc::INT   :
+        return ConstDataArrayProxy<int,float>((const int *)ptr)[s];
+    case TypeDesc::UINT64:
+        return ConstDataArrayProxy<unsigned long long,float>((const unsigned long long *)ptr)[s];
+    case TypeDesc::INT64 :
+        return ConstDataArrayProxy<long long,float>((const long long *)ptr)[s];
+    default:
+        ASSERT (0);
+        return 0.0f;
+    }
 }
 
 

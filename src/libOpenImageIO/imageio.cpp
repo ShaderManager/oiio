@@ -49,8 +49,11 @@ OIIO_NAMESPACE_ENTER
 
 // Global private data
 namespace pvt {
+recursive_mutex imageio_mutex;
 int oiio_threads = boost::thread::hardware_concurrency();
 ustring plugin_searchpath;
+std::string format_list;   // comma-separated list of all formats
+std::string extension_list;   // list of all extensions for all formats
 };
 
 
@@ -79,7 +82,6 @@ error_msg ()
 
 } // end anon namespace
 
-recursive_mutex pvt::imageio_mutex;
 
 
 
@@ -154,6 +156,18 @@ getattribute (const std::string &name, TypeDesc type, void *val)
     }
     if (name == "plugin_searchpath" && type == TypeDesc::TypeString) {
         *(ustring *)val = plugin_searchpath;
+        return true;
+    }
+    if (name == "format_list" && type == TypeDesc::TypeString) {
+        if (format_list.empty())
+            pvt::catalog_all_plugins (plugin_searchpath.string());
+        *(ustring *)val = ustring(format_list);
+        return true;
+    }
+    if (name == "extension_list" && type == TypeDesc::TypeString) {
+        if (extension_list.empty())
+            pvt::catalog_all_plugins (plugin_searchpath.string());
+        *(ustring *)val = ustring(extension_list);
         return true;
     }
     return false;
@@ -535,6 +549,71 @@ copy_image (int nchannels, int width, int height, int depth,
         }
     }
     return true;
+}
+
+
+
+void
+DeepData::init (int npix, int nchan,
+                const TypeDesc *chbegin, const TypeDesc *chend)
+{
+    clear ();
+    npixels = npix;
+    nchannels = nchan;
+    channeltypes.assign (chbegin, chend);
+    nsamples.resize (npixels, 0);
+    pointers.resize (size_t(npixels)*size_t(nchannels), NULL);
+}
+
+
+
+void
+DeepData::alloc ()
+{
+    // Calculate the total size we need, align each channel to 4 byte boundary
+    size_t totalsamples = 0, totalbytes = 0;
+    for (int i = 0;  i < npixels;  ++i) {
+        int s = nsamples[i];
+        totalsamples += s;
+        for (int c = 0;  c < nchannels;  ++c)
+            totalbytes += round_to_multiple (channeltypes[c].size() * s, 4);
+    }
+
+    // Set all the data pointers to the right offsets within the
+    // data block.  Leave the pointes NULL for pixels with no samples.
+    data.resize (totalbytes);
+    char *p = &data[0];
+    for (int i = 0;  i < npixels;  ++i) {
+        if (nsamples[i]) {
+            for (int c = 0;  c < nchannels;  ++c) {
+                pointers[i*nchannels+c] = p;
+                p += round_to_multiple (channeltypes[c].size()*nsamples[i], 4);
+            }
+        }
+    }
+}
+
+
+
+void
+DeepData::clear ()
+{
+    npixels = 0;
+    nchannels = 0;
+    channeltypes.clear();
+    nsamples.clear();
+    pointers.clear();
+    data.clear();
+}
+
+
+
+void
+DeepData::free ()
+{
+    std::vector<unsigned int>().swap (nsamples);
+    std::vector<void *>().swap (pointers);
+    std::vector<char>().swap (data);
 }
 
 }
