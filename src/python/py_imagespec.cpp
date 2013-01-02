@@ -32,7 +32,6 @@
 
 namespace PyOpenImageIO
 {
-using namespace boost::python;
 using namespace std;
 
 /// Accessor for channelnames, converts a vector<string> to a tuple
@@ -48,13 +47,13 @@ object ImageSpec_get_channelnames(const ImageSpec& imageSpec)
 }
 
 /// Mutator for channelnames, sets a vector<string> using a tuple
-void ImageSpec_set_channelnames(ImageSpec& imageSpec, const tuple& channelnames)
+void ImageSpec_set_channelnames(ImageSpec& imageSpec, const boost::python::tuple& channelnames)
 {
-    const unsigned int length = len(channelnames);
+    const unsigned int length = boost::python::len(channelnames);
     imageSpec.channelnames.resize(length);
 
     for (unsigned i = 0; i < length; ++i) {
-        imageSpec.channelnames[i] = extract<string>(channelnames[i]);
+        imageSpec.channelnames[i] = boost::python::extract<string>(channelnames[i]);
     }
 }
 
@@ -103,7 +102,7 @@ stride_t ImageSpec_pixel_bytes_2(ImageSpec& spec, int chbegin, int chend, bool n
 
 void declare_imagespec()
 {
-    class_<ImageSpec>("ImageSpec")
+    boost::python::class_<ImageSpec>("ImageSpec")
         .def_readwrite("x",             &ImageSpec::x)
         .def_readwrite("y",             &ImageSpec::y)
         .def_readwrite("z",             &ImageSpec::z)
@@ -129,10 +128,10 @@ void declare_imagespec()
         .def_readwrite("quant_min",     &ImageSpec::quant_min)
         .def_readwrite("quant_max",     &ImageSpec::quant_max)
         .add_property("extra_attribs", 
-            make_getter(&ImageSpec::extra_attribs))//ImageIOParameterList
-        .def(init<int, int, int, TypeDesc>())
-        .def(init<TypeDesc>())
-        .def(init<const ImageSpec&>())
+            boost::python::make_getter(&ImageSpec::extra_attribs))//ImageIOParameterList
+        .def(boost::python::init<int, int, int, TypeDesc>())
+        .def(boost::python::init<TypeDesc>())
+        .def(boost::python::init<const ImageSpec&>())
         .def("set_format",              &ImageSpec::set_format)
         .def("default_channel_names",   &ImageSpec::default_channel_names)
         .def("format_from_quantize",    &ImageSpec::format_from_quantize)

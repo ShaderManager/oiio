@@ -35,8 +35,7 @@
 #include <boost/foreach.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
-#include <boost/tr1/memory.hpp>
-using namespace std::tr1;
+#include <memory>
 
 #include <OpenEXR/ImathMatrix.h>
 

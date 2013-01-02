@@ -25,6 +25,10 @@ if (BOOST_CUSTOM OR Boost_FOUND AND PYTHONLIBS_FOUND)
     message (STATUS "Python to include 'lib' prefix: ${PYLIB_LIB_PREFIX}")
     message (STATUS "Python to include SO version: ${PYLIB_INCLUDE_SONAME}")
 
+		if (LINKSTATIC)
+			add_definitions(-DBOOST_PYTHON_STATIC_LIB)
+		endif ()
+
     include_directories (${PYTHON_INCLUDE_PATH} ${Boost_INCLUDE_DIRS})
     add_library (PyOpenImageIO SHARED ${python_srcs})
     target_link_libraries (PyOpenImageIO OpenImageIO ${Boost_LIBRARIES} ${Boost_Python_LIBRARIES} ${PYTHON_LIBRARIES} ${CMAKE_DL_LIBS})

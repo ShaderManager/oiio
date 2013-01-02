@@ -42,9 +42,8 @@
 #include "thread.h"
 #include "version.h"
 
-// Use Boost for shared pointers
-#include <boost/tr1/memory.hpp>
-using std::tr1::shared_ptr;
+#include <memory>
+using std::shared_ptr;
 #include <boost/intrusive_ptr.hpp>
 using boost::intrusive_ptr;
 

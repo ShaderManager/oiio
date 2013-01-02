@@ -30,8 +30,7 @@
 
 #include <string>
 #include <boost/scoped_ptr.hpp>
-#include <boost/tr1/memory.hpp>
-using namespace std::tr1;
+#include <memory>
 
 #include "dassert.h"
 #include "typedesc.h"

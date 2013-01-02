@@ -41,6 +41,7 @@
 #include <boost/algorithm/string.hpp>
 
 #ifdef _WIN32
+#define NOMINMAX
 #include <windows.h>
 #include <shellapi.h>
 #endif

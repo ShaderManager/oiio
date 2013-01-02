@@ -70,20 +70,26 @@
 ///
 /// 
 
-#if defined(_MSC_VER) || defined(__CYGWIN__)
-  #define OIIO_IMPORT __declspec(dllimport)
-  #define OIIO_EXPORT __declspec(dllexport)
-  #define OIIO_LOCAL
+#if !defined(OIIO_STATIC_BUILD) || !OIIO_STATIC_BUILD
+	#if defined(_MSC_VER) || defined(__CYGWIN__)
+			#define OIIO_IMPORT __declspec(dllimport)
+			#define OIIO_EXPORT __declspec(dllexport)
+			#define OIIO_LOCAL
+	#else
+	  #if __GNUC__ >= 4
+		#define OIIO_IMPORT __attribute__ ((visibility ("default")))
+		#define OIIO_EXPORT __attribute__ ((visibility ("default")))
+		#define OIIO_LOCAL  __attribute__ ((visibility ("hidden")))
+	  #else
+		#define OIIO_IMPORT
+		#define OIIO_EXPORT
+		#define OIIO_LOCAL
+	  #endif
+	#endif
 #else
-  #if __GNUC__ >= 4
-    #define OIIO_IMPORT __attribute__ ((visibility ("default")))
-    #define OIIO_EXPORT __attribute__ ((visibility ("default")))
-    #define OIIO_LOCAL  __attribute__ ((visibility ("hidden")))
-  #else
-    #define OIIO_IMPORT
-    #define OIIO_EXPORT
-    #define OIIO_LOCAL
-  #endif
+	#define OIIO_IMPORT
+	#define OIIO_EXPORT
+	#define OIIO_LOCAL
 #endif
 
 #if defined(OpenImageIO_EXPORTS)
