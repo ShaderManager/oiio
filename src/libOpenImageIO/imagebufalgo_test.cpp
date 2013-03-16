@@ -40,6 +40,7 @@
 #include <iostream>
 #include <iomanip>
 #include <string>
+#include <cstdio>
 
 OIIO_NAMESPACE_USING;
 
@@ -149,6 +150,49 @@ void test_crop ()
 
 
 
+void test_paste ()
+{
+    // Create the source image, make it a gradient
+    ImageSpec Aspec (4, 4, 3, TypeDesc::FLOAT);
+    ImageBuf A ("A", Aspec);
+    for (ImageBuf::Iterator<float> it (A);  !it.done();  ++it) {
+        it[0] = float(it.x()) / float(Aspec.width-1);
+        it[1] = float(it.y()) / float(Aspec.height-1);
+        it[2] = 0.1f;
+    }
+
+    // Create destination image -- black it out
+    ImageSpec Bspec (8, 8, 3, TypeDesc::FLOAT);
+    ImageBuf B ("B", Bspec);
+    float gray[3] = { .1, .1, .1 };
+    ImageBufAlgo::fill (B, gray);
+
+    // Paste a few pixels from A into B -- include offsets
+    ImageBufAlgo::paste (B, 2, 2, 0, 1 /* chan offset */,
+                         A, ROI(1, 4, 1, 4));
+
+    // Spot check
+    float a[3], b[3];
+    B.getpixel (1, 1, 0, b);
+    OIIO_CHECK_EQUAL (b[0], gray[0]);
+    OIIO_CHECK_EQUAL (b[1], gray[1]);
+    OIIO_CHECK_EQUAL (b[2], gray[2]);
+
+    B.getpixel (2, 2, 0, b);
+    A.getpixel (1, 1, 0, a);
+    OIIO_CHECK_EQUAL (b[0], gray[0]);
+    OIIO_CHECK_EQUAL (b[1], a[0]);
+    OIIO_CHECK_EQUAL (b[2], a[1]);
+
+    B.getpixel (3, 4, 0, b);
+    A.getpixel (2, 3, 0, a);
+    OIIO_CHECK_EQUAL (b[0], gray[0]);
+    OIIO_CHECK_EQUAL (b[1], a[0]);
+    OIIO_CHECK_EQUAL (b[2], a[1]);
+}
+
+
+
 // Tests ImageBufAlgo::add
 void test_add ()
 {
@@ -226,13 +270,46 @@ void test_compare ()
 
 
 
+// Test ability to do a maketx directly from an ImageBuf
+void
+test_maketx_from_imagebuf()
+{
+    // Make a checkerboard
+    const int WIDTH = 16, HEIGHT = 16, CHANNELS = 3;
+    ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
+    ImageBuf A ("A", spec);
+    float pink[] = { .5, .3, .3 }, green[] = { .1, .5, .1 };
+    ImageBufAlgo::checker (A, 4, pink, green, 0, WIDTH, 0, HEIGHT, 0, 1);
+
+    // Write it
+    const char *pgname = "oiio-pgcheck.tx";
+    remove (pgname);  // Remove it first
+    ImageSpec configspec;
+    ImageBufAlgo::make_texture (ImageBufAlgo::MakeTxTexture, A,
+                                pgname, configspec);
+
+    // Read it back and compare it
+    ImageBuf B (pgname);
+    B.read ();
+    ImageBufAlgo::CompareResults comparison;
+    ImageBufAlgo::compare (A, B, 0, 0, comparison);
+    OIIO_CHECK_EQUAL (comparison.nwarn, 0);
+    OIIO_CHECK_EQUAL (comparison.nfail, 0);
+    remove (pgname);  // clean up
+}
+
+
+
+
 int
 main (int argc, char **argv)
 {
     test_zero_fill ();
     test_crop ();
+    test_paste ();
     test_add ();
     test_compare ();
+    test_maketx_from_imagebuf ();
     
     return unit_test_failures;
 }

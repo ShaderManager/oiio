@@ -37,10 +37,13 @@
 #define OPENIMAGEIO_IMAGECACHE_PVT_H
 
 #include <boost/unordered_map.hpp>
+#include <boost/scoped_array.hpp>
 
+#include "export.h"
 #include "texture.h"
 #include "refcnt.h"
 #include "hash.h"
+#include "imagebuf.h"
 
 
 OIIO_NAMESPACE_ENTER
@@ -48,7 +51,7 @@ OIIO_NAMESPACE_ENTER
 
 namespace pvt {
 
-#ifdef DEBUG
+#ifndef NDEBUG
 # define IMAGECACHE_TIME_STATS 1
 #else
     // Change the following to 1 to get timing statistics even for
@@ -129,7 +132,7 @@ struct ImageCacheStatistics {
 /// However, a few of them require passing in a pointer to the
 /// thread-specific IC data including microcache and statistics.
 ///
-class ImageCacheFile : public RefCnt {
+class OIIO_API ImageCacheFile : public RefCnt {
 public:
     ImageCacheFile (ImageCacheImpl &imagecache,
                     ImageCachePerThreadInfo *thread_info, ustring filename);
@@ -471,7 +474,7 @@ public:
     /// Return the actual allocated memory size for this tile's pixels.
     ///
     size_t memsize () const {
-        return m_pixels.size();
+        return m_pixels_size;
     }
 
     /// Return the space that will be needed for this tile's pixels.
@@ -511,11 +514,11 @@ public:
 
 private:
     TileID m_id;                  ///< ID of this tile
-    std::vector<char> m_pixels;   ///< The pixel data
+    boost::scoped_array<char> m_pixels;  ///< The pixel data
+    size_t m_pixels_size;         ///< How much m_pixels has allocated
     bool m_valid;                 ///< Valid pixels
-    atomic_int m_used;            ///< Used recently
     volatile bool m_pixels_ready; ///< The pixels have been read from disk
-    float m_mindepth, m_maxdepth; ///< shadows only: min/max depth of the tile
+    atomic_int m_used;            ///< Used recently
 };
 
 
@@ -709,12 +712,12 @@ public:
             DASSERT (m_tilemutex_holder != thread_info &&
                 "tile_in_cache called with do_lock=true, but already locked!");
             ic_read_lock lock (m_tilemutex);
-#ifdef DEBUG
+#ifndef NDEBUG
             DASSERT (m_tilemutex_holder == NULL);
 //            m_tilemutex_holder = thread_info;
 #endif
             found = m_tilecache.find (id);
-#ifdef DEBUG
+#ifndef NDEBUG
 //            m_tilemutex_holder = NULL;
 #endif
         } else {
@@ -881,7 +884,7 @@ private:
 
     /// Debugging aid -- set which thread holds the tile mutex
     void tilemutex_holder (ImageCachePerThreadInfo *p) {
-#ifdef DEBUG
+#ifndef NDEBUG
         if (p)                                     // if we claim to own it,
             DASSERT (m_tilemutex_holder == NULL);  // nobody else better!
         m_tilemutex_holder = p;
@@ -889,7 +892,7 @@ private:
     }
     /// Debugging aid -- set which thread holds the file mutex
     void filemutex_holder (ImageCachePerThreadInfo *p) {
-#ifdef DEBUG
+#ifndef NDEBUG
         if (p)                                     // if we claim to own it,
             DASSERT (m_filemutex_holder == NULL);  // nobody else better!
         m_filemutex_holder = p;
@@ -1012,7 +1015,7 @@ private:
 
 
 
-};  // end namespace pvt
+}  // end namespace pvt
 
 }
 OIIO_NAMESPACE_EXIT

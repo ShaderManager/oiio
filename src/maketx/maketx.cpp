@@ -38,6 +38,7 @@
 
 #include <boost/version.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/regex.hpp>
 #include <OpenEXR/ImathMatrix.h>
 
 #include "argparse.h"
@@ -59,6 +60,7 @@ OIIO_NAMESPACE_USING
 // # FIXME: Refactor all statics into a struct
 
 // Basic runtime options
+static bool newmode = true;
 static std::string full_command_line;
 static std::vector<std::string> filenames;
 static std::string outputfilename;
@@ -80,6 +82,7 @@ static double stat_miptime = 0;
 static double stat_colorconverttime = 0;
 static bool checknan = false;
 static std::string fixnan = "none"; // none, black, box3
+static bool set_full_to_pixels = false;
 static int found_nonfinite = 0;
 static spin_mutex maketx_mutex;   // for anything that needs locking
 static std::string filtername = "box";
@@ -231,6 +234,8 @@ getargs (int argc, char *argv[])
                   "-o %s", &outputfilename, "Output filename",
                   "--threads %d", &nthreads, "Number of threads (default: #cores)",
                   "-u", &updatemode, "Update mode",
+                  "--new", &newmode, "",
+                  "--old %!", &newmode, "",
                   "--format %s", &fileformatname, "Specify output file format (default: guess from extension)",
                   "--nchannels %d", &nchannels, "Specify the number of output image channels.",
                   "-d %s", &dataformatname, "Set the output data format to one of: "
@@ -249,6 +254,7 @@ getargs (int argc, char *argv[])
                   "--nomipmap", &nomipmap, "Do not make multiple MIP-map levels",
                   "--checknan", &checknan, "Check for NaN/Inf values (abort if found)",
                   "--fixnan %s", &fixnan, "Attempt to fix NaN/Inf values in the image (options: none, black, box3)",
+                  "--fullpixels", &set_full_to_pixels, "Set the 'full' image range to be the pixel data window",
                   "--Mcamera %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
                           &Mcam[0][0], &Mcam[0][1], &Mcam[0][2], &Mcam[0][3], 
                           &Mcam[1][0], &Mcam[1][1], &Mcam[1][2], &Mcam[1][3], 
@@ -289,7 +295,7 @@ getargs (int argc, char *argv[])
                           "if your image contains an alpha channel.",
                   "<SEPARATOR>", "Configuration Presets",
                   "--prman", &prman, "Use PRMan-safe settings for tile size, planarconfig, and metadata.",
-                  "--oiio", &oiio, "Use OIIO-optimized settings for tile size, planarconfig, metadata, and constant-color optimizations.",
+                  "--oiio", &oiio, "Use OIIO-optimized settings for tile size, planarconfig, metadata.",
                   NULL);
     if (ap.parse (argc, (const char**)argv) < 0) {
         std::cerr << ap.geterror() << std::endl;
@@ -509,8 +515,8 @@ interppixel_NDC_clamped (const ImageBuf &buf, float x, float y, float *pixel)
     // Clamp
     int xnext = Imath::clamp (xtexel+1, buf.xmin(), buf.xmax());
     int ynext = Imath::clamp (ytexel+1, buf.ymin(), buf.ymax());
-    xnext = Imath::clamp (xnext, buf.xmin(), buf.xmax());
-    ynext = Imath::clamp (ynext, buf.ymin(), buf.ymax());
+    xtexel = Imath::clamp (xtexel, buf.xmin(), buf.xmax());
+    ytexel = Imath::clamp (ytexel, buf.ymin(), buf.ymax());
 
     // Get the four texels
     buf.getpixel (xtexel, ytexel, p[0], n);
@@ -617,8 +623,6 @@ fix_latl_edges (ImageBuf &buf)
             for (int c = 0;  c < n;  ++c)
                 left[c] += right[c];
         }
-        for (int c = 0;  c < n;  ++c)
-            left[c] += right[c];
         for (int c = 0;  c < n;  ++c)
             left[c] *= wscale;
         for (int x = buf.xbegin();  x < buf.xend();  ++x)
@@ -836,6 +840,18 @@ make_texturemap (const char *maptypename = "texture map")
             out_dataformat = TypeDesc::FLOAT;
     }
 
+    if (set_full_to_pixels) {
+        // User requested that we treat the image as uncropped or not
+        // overscan
+        ImageSpec &spec (src.specmod());
+        spec.full_x = spec.x = 0;
+        spec.full_y = spec.y = 0;
+        spec.full_z = spec.z = 0;
+        spec.full_width = spec.width;
+        spec.full_height = spec.height;
+        spec.full_depth = spec.depth;
+    }
+
     // Copy the input spec
     const ImageSpec &srcspec = src.spec();
     ImageSpec dstspec = srcspec;
@@ -910,7 +926,16 @@ make_texturemap (const char *maptypename = "texture map")
         time (&date);    // not update: get the time now
     dstspec.attribute ("DateTime", datestring(date));
 
-    dstspec.attribute ("Software", full_command_line);
+    std::string software = Strutil::format ("OpenImageIO %s : %s",
+                                      OIIO_VERSION_STRING, full_command_line);
+    dstspec.attribute ("Software", software);
+
+    // Append command to image history
+    std::string history = dstspec.get_string_attribute ("Exif:ImageHistory");
+    if (history.length() && ! Strutil::iends_with (history, "\n"))
+        history += std::string("\n");
+    history += full_command_line;
+    dstspec.attribute ("Exif:ImageHistory", history);
     
     if (shadowmode) {
         dstspec.attribute ("textureformat", "Shadow");
@@ -1121,14 +1146,15 @@ make_texturemap (const char *maptypename = "texture map")
     std::string desc = dstspec.get_string_attribute ("ImageDescription");
     bool updatedDesc = false;
     
-    // FIXME: We need to do real dictionary style partial updates on the
-    //        ImageDescription. I.e., set one key without affecting the
-    //        other keys. But in the meantime, just clear it out if
-    //        it appears the incoming image was a maketx style texture.
-    
-    if ((desc.find ("SHA-1=") != std::string::npos) || 
-        (desc.find ("ConstantColor=") != std::string::npos)) {
-        desc = "";
+    // Eliminate any SHA-1 or ConstantColor hints in the ImageDescription.
+    if (desc.size()) {
+        desc = boost::regex_replace (desc, boost::regex("SHA-1=[[:xdigit:]]*[ ]*"), "");
+        static const char *fp_number_pattern =
+            "([+-]?((?:(?:[[:digit:]]*\\.)?[[:digit:]]+(?:[eE][+-]?[[:digit:]]+)?)))";
+        const std::string color_pattern =
+            std::string ("ConstantColor=(\\[?") + fp_number_pattern + ",?)+\\]?[ ]*";
+        desc = boost::regex_replace (desc, boost::regex(color_pattern), "");
+        updatedDesc = true;
     }
     
     // The hash is only computed for the top mipmap level of pixel data.
@@ -1361,6 +1387,218 @@ write_mipmap (ImageBuf &img, const ImageSpec &outspec_template,
 
 
 
+
+static void
+newmode_getargs (int argc, char *argv[], ImageSpec &configspec)
+{
+    bool help = false;
+    // Basic runtime options
+    std::string dataformatname = "";
+    std::string fileformatname = "";
+    std::vector<std::string> mipimages;
+    int tile[3] = { 64, 64, 1 };  // FIXME if we ever support volume MIPmaps
+    std::string compression = "zip";
+    bool updatemode = false;
+    bool checknan = false;
+    std::string fixnan; // none, black, box3
+    bool set_full_to_pixels = false;
+    std::string filtername;
+    // Options controlling file metadata or mipmap creation
+    float fovcot = 0.0f;
+    std::string wrap = "black";
+    std::string swrap;
+    std::string twrap;
+    bool doresize = false;
+    Imath::M44f Mcam(0.0f), Mscr(0.0f);  // Initialize to 0
+    bool separate = false;
+    bool nomipmap = false;
+    bool prman_metadata = false;
+    bool constant_color_detect = false;
+    bool monochrome_detect = false;
+    bool opaque_detect = false;
+    int nchannels = -1;
+    bool prman = false;
+    bool oiio = false;
+    bool ignore_unassoc = false;  // ignore unassociated alpha tags
+    bool unpremult = false;
+    std::string incolorspace;
+    std::string outcolorspace;
+    
+    filenames.clear();
+
+    ArgParse ap;
+    ap.options ("maketx -- convert images to tiled, MIP-mapped textures\n"
+                OIIO_INTRO_STRING "\n"
+                "Usage:  maketx [options] file...",
+                  "%*", parse_files, "",
+                  "--help", &help, "Print help message",
+                  "-v", &verbose, "Verbose status messages",
+                  "-o %s", &outputfilename, "Output filename",
+                  "--new", NULL, "",
+                  "--old", NULL, "Old mode",
+                  "--threads %d", &nthreads, "Number of threads (default: #cores)",
+                  "-u", &updatemode, "Update mode",
+                  "--format %s", &fileformatname, "Specify output file format (default: guess from extension)",
+                  "--nchannels %d", &nchannels, "Specify the number of output image channels.",
+                  "-d %s", &dataformatname, "Set the output data format to one of: "
+                          "uint8, sint8, uint16, sint16, half, float",
+                  "--tile %d %d", &tile[0], &tile[1], "Specify tile size",
+                  "--separate", &separate, "Use planarconfig separate (default: contiguous)",
+                  "--compression %s", &compression, "Set the compression method (default = zip, if possible)",
+                  "--fovcot %f", &fovcot, "Override the frame aspect ratio. Default is width/height.",
+                  "--wrap %s", &wrap, "Specify wrap mode (black, clamp, periodic, mirror)",
+                  "--swrap %s", &swrap, "Specific s wrap mode separately",
+                  "--twrap %s", &twrap, "Specific t wrap mode separately",
+                  "--resize", &doresize, "Resize textures to power of 2 (default: no)",
+                  "--noresize %!", &doresize, "Do not resize textures to power of 2 (deprecated)",
+                  "--filter %s", &filtername, filter_help_string().c_str(),
+                  "--nomipmap", &nomipmap, "Do not make multiple MIP-map levels",
+                  "--checknan", &checknan, "Check for NaN/Inf values (abort if found)",
+                  "--fixnan %s", &fixnan, "Attempt to fix NaN/Inf values in the image (options: none, black, box3)",
+                  "--fullpixels", &set_full_to_pixels, "Set the 'full' image range to be the pixel data window",
+                  "--Mcamera %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
+                          &Mcam[0][0], &Mcam[0][1], &Mcam[0][2], &Mcam[0][3], 
+                          &Mcam[1][0], &Mcam[1][1], &Mcam[1][2], &Mcam[1][3], 
+                          &Mcam[2][0], &Mcam[2][1], &Mcam[2][2], &Mcam[2][3], 
+                          &Mcam[3][0], &Mcam[3][1], &Mcam[3][2], &Mcam[3][3], 
+                          "Set the camera matrix",
+                  "--Mscreen %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
+                          &Mscr[0][0], &Mscr[0][1], &Mscr[0][2], &Mscr[0][3], 
+                          &Mscr[1][0], &Mscr[1][1], &Mscr[1][2], &Mscr[1][3], 
+                          &Mscr[2][0], &Mscr[2][1], &Mscr[2][2], &Mscr[2][3], 
+                          &Mscr[3][0], &Mscr[3][1], &Mscr[3][2], &Mscr[3][3], 
+                          "Set the screen matrix",
+                  "--hash", NULL, "",
+                  "--prman-metadata", &prman_metadata, "Add prman specific metadata",
+                  "--constant-color-detect", &constant_color_detect, "Create 1-tile textures from constant color inputs",
+                  "--monochrome-detect", &monochrome_detect, "Create 1-channel textures from monochrome inputs",
+                  "--opaque-detect", &opaque_detect, "Drop alpha channel that is always 1.0",
+                  "--ignore-unassoc", &ignore_unassoc, "Ignore unassociated alpha tags in input (don't autoconvert)",
+                  "--stats", &stats, "Print runtime statistics",
+                  "--mipimage %L", &mipimages, "Specify an individual MIP level",
+                  "<SEPARATOR>", "Basic modes (default is plain texture):",
+                  "--shadow", &shadowmode, "Create shadow map",
+                  "--envlatl", &envlatlmode, "Create lat/long environment map",
+//                  "--envcube", &envcubemode, "Create cubic env map (file order: px, nx, py, ny, pz, nz) (UNIMP)",
+                  "<SEPARATOR>", colortitle_help_string().c_str(),
+                  "--colorconvert %s %s", &incolorspace, &outcolorspace,
+                          colorconvert_help_string().c_str(),
+                  "--unpremult", &unpremult, "Unpremultiply before color conversion, then premultiply "
+                          "after the color conversion.  You'll probably want to use this flag "
+                          "if your image contains an alpha channel.",
+                  "<SEPARATOR>", "Configuration Presets",
+                  "--prman", &prman, "Use PRMan-safe settings for tile size, planarconfig, and metadata.",
+                  "--oiio", &oiio, "Use OIIO-optimized settings for tile size, planarconfig, metadata.",
+                  NULL);
+    if (ap.parse (argc, (const char**)argv) < 0) {
+        std::cerr << ap.geterror() << std::endl;
+        ap.usage ();
+        exit (EXIT_FAILURE);
+    }
+    if (help || filenames.empty()) {
+        ap.usage ();
+        exit (EXIT_FAILURE);
+    }
+
+    int optionsum = ((int)shadowmode + (int)envlatlmode + (int)envcubemode);
+    if (optionsum > 1) {
+        std::cerr << "maketx ERROR: At most one of the following options may be set:\n"
+                  << "\t--shadow --envlatl --envcube\n";
+        ap.usage ();
+        exit (EXIT_FAILURE);
+    }
+    if (optionsum == 0)
+        mipmapmode = true;
+    
+    if (prman && oiio) {
+        std::cerr << "maketx ERROR: '--prman' compatibility, and '--oiio' optimizations are mutually exclusive.\n";
+        std::cerr << "\tIf you'd like both prman and oiio compatibility, you should choose --prman\n";
+        std::cerr << "\t(at the expense of oiio-specific optimizations)\n";
+        ap.usage ();
+        exit (EXIT_FAILURE);
+    }
+
+    if (filenames.size() != 1) {
+        std::cerr << "maketx ERROR: requires exactly one input filename\n";
+        exit (EXIT_FAILURE);
+    }
+
+
+//    std::cout << "Converting " << filenames[0] << " to " << outputfilename << "\n";
+
+    // Figure out which data format we want for output
+    if (! dataformatname.empty()) {
+        if (dataformatname == "uint8")
+            configspec.format = TypeDesc::UINT8;
+        else if (dataformatname == "int8" || dataformatname == "sint8")
+            configspec.format = TypeDesc::INT8;
+        else if (dataformatname == "uint16")
+            configspec.format = TypeDesc::UINT16;
+        else if (dataformatname == "int16" || dataformatname == "sint16")
+            configspec.format = TypeDesc::INT16;
+        else if (dataformatname == "half")
+            configspec.format = TypeDesc::HALF;
+        else if (dataformatname == "float")
+            configspec.format = TypeDesc::FLOAT;
+        else if (dataformatname == "double")
+            configspec.format = TypeDesc::DOUBLE;
+    }
+
+    configspec.tile_width  = tile[0];
+    configspec.tile_height = tile[1];
+    configspec.tile_depth  = tile[2];
+    configspec.attribute ("compression", compression);
+    if (fovcot != 0.0f)
+        configspec.attribute ("fovcot", fovcot);
+    configspec.attribute ("planarconfig", separate ? "separate" : "contig");
+    if (Mcam != Imath::M44f(0.0f))
+        configspec.attribute ("worldtocamera", TypeDesc::TypeMatrix, &Mcam);
+    if (Mscr != Imath::M44f(0.0f))
+        configspec.attribute ("worldtoscreen", TypeDesc::TypeMatrix, &Mscr);
+    std::string wrapmodes = (swrap.size() ? swrap : wrap) + ',' + 
+                            (twrap.size() ? twrap : wrap);
+    configspec.attribute ("wrapmodes", wrapmodes);
+
+    configspec.attribute ("maketx:verbose", verbose);
+    configspec.attribute ("maketx:stats", stats);
+    configspec.attribute ("maketx:resize", doresize);
+    configspec.attribute ("maketx:nomipmap", nomipmap);
+    configspec.attribute ("maketx:updatemode", updatemode);
+    configspec.attribute ("maketx:constant_color_detect", constant_color_detect);
+    configspec.attribute ("maketx:monochrome_detect", monochrome_detect);
+    configspec.attribute ("maketx:opaque_detect", opaque_detect);
+    configspec.attribute ("maketx:unpremult", unpremult);
+    configspec.attribute ("maketx:incolorspace", incolorspace);
+    configspec.attribute ("maketx:outcolorspace", outcolorspace);
+    configspec.attribute ("maketx:checknan", checknan);
+    configspec.attribute ("maketx:fixnan", fixnan);
+    configspec.attribute ("maketx:set_full_to_pixels", set_full_to_pixels);
+    if (filtername.size())
+        configspec.attribute ("maketx:filtername", filtername);
+    configspec.attribute ("maketx:nchannels", nchannels);
+    if (fileformatname.size())
+        configspec.attribute ("maketx:fileformatname", fileformatname);
+    configspec.attribute ("maketx:prman_metadata", prman_metadata);
+    configspec.attribute ("maketx:oiio_options", oiio);
+    configspec.attribute ("maketx:prman_options", prman);
+    if (mipimages.size())
+        configspec.attribute ("maketx:mipimages", Strutil::join(mipimages,";"));
+
+    std::string cmdline = Strutil::format ("OpenImageIO %s : %s",
+                                     OIIO_VERSION_STRING, ap.command_line());
+    configspec.attribute ("Software", cmdline);
+    configspec.attribute ("maketx:full_command_line", cmdline);
+
+    if (ignore_unassoc) {
+        configspec.attribute ("maketx:ignore_unassoc", (int)ignore_unassoc);
+        ImageCache *ic = ImageCache::create ();  // get the shared one
+        ic->attribute ("unassociatedalpha", (int)ignore_unassoc);
+    }
+}
+
+
+
+
 int
 main (int argc, char *argv[])
 {
@@ -1374,6 +1612,23 @@ main (int argc, char *argv[])
     ic->attribute ("forcefloat", 1);   // Force float upon read
     ic->attribute ("max_memory_MB", 1024.0);  // 1 GB cache
     ic->attribute ("unassociatedalpha", (int)ignore_unassoc);
+
+    if (newmode) {
+        ImageSpec configspec;
+        newmode_getargs (argc, argv, configspec);
+        ImageBufAlgo::MakeTextureMode mode = ImageBufAlgo::MakeTxTexture;
+        if (shadowmode)
+            mode = ImageBufAlgo::MakeTxShadow;
+        if (envlatlmode)
+            mode = ImageBufAlgo::MakeTxEnvLatl;
+        bool ok = ImageBufAlgo::make_texture (mode, filenames[0],
+                                              outputfilename, configspec,
+                                              &std::cout);
+        if (stats)
+            std::cout << "\n" << ic->getstats();
+        return ok ? 0 : EXIT_FAILURE;
+    }
+
 
     if (mipmapmode) {
         make_texturemap ("texture map");
