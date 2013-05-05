@@ -83,6 +83,7 @@ static double stat_colorconverttime = 0;
 static bool checknan = false;
 static std::string fixnan = "none"; // none, black, box3
 static bool set_full_to_pixels = false;
+static bool do_highlight_compensation = false;
 static int found_nonfinite = 0;
 static spin_mutex maketx_mutex;   // for anything that needs locking
 static std::string filtername = "box";
@@ -120,6 +121,7 @@ static bool prman = false;
 static bool oiio = false;
 static bool src_samples_border = false; // are src edge samples on the border?
 static bool ignore_unassoc = false;  // ignore unassociated alpha tags
+static std::string channelnames;
 
 static bool unpremult = false;
 static std::string incolorspace;
@@ -238,6 +240,7 @@ getargs (int argc, char *argv[])
                   "--old %!", &newmode, "",
                   "--format %s", &fileformatname, "Specify output file format (default: guess from extension)",
                   "--nchannels %d", &nchannels, "Specify the number of output image channels.",
+                  "--chnames %s", &channelnames, "Rename channels (comma-separated)",
                   "-d %s", &dataformatname, "Set the output data format to one of: "
                           "uint8, sint8, uint16, sint16, half, float",
                   "--tile %d %d", &tile[0], &tile[1], "Specify tile size",
@@ -251,6 +254,8 @@ getargs (int argc, char *argv[])
                   "--resize", &doresize, "Resize textures to power of 2 (default: no)",
                   "--noresize %!", &doresize, "Do not resize textures to power of 2 (deprecated)",
                   "--filter %s", &filtername, filter_help_string().c_str(),
+                  "--hicomp", &do_highlight_compensation,
+                          "Compress HDR range before resize, expand after.",
                   "--nomipmap", &nomipmap, "Do not make multiple MIP-map levels",
                   "--checknan", &checknan, "Check for NaN/Inf values (abort if found)",
                   "--fixnan %s", &fixnan, "Attempt to fix NaN/Inf values in the image (options: none, black, box3)",
@@ -557,8 +562,8 @@ resize_block (ImageBuf *dst, const ImageBuf *src,
 
     const ImageSpec &dstspec (dst->spec());
     float *pel = (float *) alloca (dstspec.pixel_bytes());
-    float xoffset = dstspec.full_x;
-    float yoffset = dstspec.full_y;
+    float xoffset = (float)dstspec.full_x;
+    float yoffset = (float)dstspec.full_y;
     float xscale = 1.0f / (float)dstspec.full_width;
     float yscale = 1.0f / (float)dstspec.full_height;
     for (int y = y0;  y < y1;  ++y) {
@@ -795,7 +800,8 @@ make_texturemap (const char *maptypename = "texture map")
           nchannels < 0 &&
           ImageBufAlgo::isConstantChannel(src,src.spec().alpha_channel,1.0f)) {
         ImageBuf newsrc(src.name() + ".noalpha", src.spec());
-        ImageBufAlgo::setNumChannels (newsrc, src, src.nchannels()-1);
+        ImageBufAlgo::channels (newsrc, src, src.nchannels()-1,
+                                NULL, NULL, NULL, true);
         src.copy (newsrc);
         if (verbose) {
             std::cout << "  Alpha==1 image detected. Dropping the alpha channel.\n";
@@ -807,7 +813,7 @@ make_texturemap (const char *maptypename = "texture map")
           src.nchannels() == 3 && src.spec().alpha_channel < 0 &&  // RGB only
           ImageBufAlgo::isMonochrome(src)) {
         ImageBuf newsrc(src.name() + ".monochrome", src.spec());
-        ImageBufAlgo::setNumChannels (newsrc, src, 1);
+        ImageBufAlgo::channels (newsrc, src, 1, NULL, NULL, NULL, true);
         src.copy (newsrc);
         if (verbose) {
             std::cout << "  Monochrome image detected. Converting to single channel texture.\n";
@@ -818,7 +824,7 @@ make_texturemap (const char *maptypename = "texture map")
     // specific number of channels, do it.
     if ((nchannels > 0) && (nchannels != src.nchannels())) {
         ImageBuf newsrc(src.name() + ".channels", src.spec());
-        ImageBufAlgo::setNumChannels (newsrc, src, nchannels);
+        ImageBufAlgo::channels (newsrc, src, nchannels, NULL, NULL, NULL, true);
         src.copy (newsrc);
         if (verbose) {
             std::cout << "  Overriding number of channels to " << nchannels << "\n";
@@ -1290,7 +1296,8 @@ write_mipmap (ImageBuf &img, const ImageSpec &outspec_template,
                     std::cout << "WARNING: Custom mip level \"" << mipimages[0]
                               << " had the wrong number of channels.\n";
                     ImageBuf *t = new ImageBuf (mipimages[0], smallspec);
-                    ImageBufAlgo::setNumChannels(*t, *small, outspec.nchannels);
+                    ImageBufAlgo::channels (*t, *small, outspec.nchannels,
+                                            NULL, NULL, NULL, true);
                     std::swap (t, small);
                     delete t;
                 }
@@ -1334,11 +1341,18 @@ write_mipmap (ImageBuf &img, const ImageSpec &outspec_template,
                                     small->xbegin(), small->xend(),
                                     small->ybegin(), small->yend(),
                                     nthreads);
-                else
+                else {
+                    if (do_highlight_compensation)
+                        ImageBufAlgo::rangecompress (*big);
                     parallel_image (resize_block_HQ, small, big,
                                     small->xbegin(), small->xend(),
                                     small->ybegin(), small->yend(),
                                     nthreads);
+                    if (do_highlight_compensation) {
+                        ImageBufAlgo::rangeexpand (*small);
+                        ImageBufAlgo::clamp (*small, 0.0f, std::numeric_limits<float>::max(), true);
+                    }
+                }
             }
 
             stat_miptime += miptimer();
@@ -1402,6 +1416,7 @@ newmode_getargs (int argc, char *argv[], ImageSpec &configspec)
     bool checknan = false;
     std::string fixnan; // none, black, box3
     bool set_full_to_pixels = false;
+    bool do_highlight_compensation = false;
     std::string filtername;
     // Options controlling file metadata or mipmap creation
     float fovcot = 0.0f;
@@ -1423,7 +1438,8 @@ newmode_getargs (int argc, char *argv[], ImageSpec &configspec)
     bool unpremult = false;
     std::string incolorspace;
     std::string outcolorspace;
-    
+    std::string channelnames;
+
     filenames.clear();
 
     ArgParse ap;
@@ -1440,6 +1456,7 @@ newmode_getargs (int argc, char *argv[], ImageSpec &configspec)
                   "-u", &updatemode, "Update mode",
                   "--format %s", &fileformatname, "Specify output file format (default: guess from extension)",
                   "--nchannels %d", &nchannels, "Specify the number of output image channels.",
+                  "--chnames %s", &channelnames, "Rename channels (comma-separated)",
                   "-d %s", &dataformatname, "Set the output data format to one of: "
                           "uint8, sint8, uint16, sint16, half, float",
                   "--tile %d %d", &tile[0], &tile[1], "Specify tile size",
@@ -1452,6 +1469,8 @@ newmode_getargs (int argc, char *argv[], ImageSpec &configspec)
                   "--resize", &doresize, "Resize textures to power of 2 (default: no)",
                   "--noresize %!", &doresize, "Do not resize textures to power of 2 (deprecated)",
                   "--filter %s", &filtername, filter_help_string().c_str(),
+                  "--hicomp", &do_highlight_compensation,
+                          "Compress HDR range before resize, expand after.",
                   "--nomipmap", &nomipmap, "Do not make multiple MIP-map levels",
                   "--checknan", &checknan, "Check for NaN/Inf values (abort if found)",
                   "--fixnan %s", &fixnan, "Attempt to fix NaN/Inf values in the image (options: none, black, box3)",
@@ -1573,9 +1592,11 @@ newmode_getargs (int argc, char *argv[], ImageSpec &configspec)
     configspec.attribute ("maketx:checknan", checknan);
     configspec.attribute ("maketx:fixnan", fixnan);
     configspec.attribute ("maketx:set_full_to_pixels", set_full_to_pixels);
+    configspec.attribute ("maketx:highlightcomp", (int)do_highlight_compensation);
     if (filtername.size())
         configspec.attribute ("maketx:filtername", filtername);
     configspec.attribute ("maketx:nchannels", nchannels);
+    configspec.attribute ("maketx:channelnames", channelnames);
     if (fileformatname.size())
         configspec.attribute ("maketx:fileformatname", fileformatname);
     configspec.attribute ("maketx:prman_metadata", prman_metadata);

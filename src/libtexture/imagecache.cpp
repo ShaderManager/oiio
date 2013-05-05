@@ -32,6 +32,7 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <cstring>
 
 #include <OpenEXR/ImathMatrix.h>
 
@@ -55,8 +56,6 @@
 #include <boost/foreach.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/scoped_array.hpp>
-#include <boost/tr1/memory.hpp>
-using namespace std::tr1;
 
 
 OIIO_NAMESPACE_ENTER

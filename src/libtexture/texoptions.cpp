@@ -30,7 +30,6 @@
 
 #include <string>
 #include <boost/scoped_ptr.hpp>
-#include <memory>
 
 #include "dassert.h"
 #include "typedesc.h"

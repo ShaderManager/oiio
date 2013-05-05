@@ -43,6 +43,7 @@
 #include "imageio.h"
 #include "imagebuf.h"
 #include "imagebufalgo.h"
+#include "imagebufalgo_util.h"
 #include "imagecache.h"
 #include "dassert.h"
 #include "strutil.h"
@@ -159,7 +160,7 @@ public:
 
     DeepData *deepdata () { return m_spec.deep ? &m_deepdata : NULL; }
     const DeepData *deepdata () const { return m_spec.deep ? &m_deepdata : NULL; }
-    bool initialized () const { return m_spec_valid || m_pixels_valid; }
+    bool initialized () const { return m_spec_valid && (m_localpixels || m_imagecache); }
     bool cachedpixels () const { return m_localpixels == NULL; }
 
     const void *pixeladdr (int x, int y, int z) const;
@@ -387,6 +388,7 @@ ImageBufImpl::clear ()
     m_pixel_bytes = 0;
     m_scanline_bytes = 0;
     m_plane_bytes = 0;
+    m_imagecache = NULL;
     m_deepdata.free ();
     m_blackpixel.clear ();
 }
@@ -462,6 +464,13 @@ void
 ImageBufImpl::alloc (const ImageSpec &spec)
 {
     m_spec = spec;
+
+    // Preclude a nonsensical size
+    m_spec.width = std::max (1, m_spec.width);
+    m_spec.height = std::max (1, m_spec.height);
+    m_spec.depth = std::max (1, m_spec.depth);
+    m_spec.nchannels = std::max (1, m_spec.nchannels);
+
     m_nativespec = spec;
     m_spec_valid = true;
     realloc ();
@@ -624,6 +633,11 @@ ImageBufImpl::read (int subimage, int miplevel, bool force, TypeDesc convert,
         std::cerr << "going to have to read " << m_name << ": "
                   << m_spec.format.c_str() << " vs " << convert.c_str() << "\n";
 #endif
+        // FIXME/N.B. - is it really best to go through the ImageCache
+        // for forced IB reads?  Are there circumstances in which we
+        // should just to a straight read_image() to avoid the extra
+        // copies or the memory use of having bytes both in the cache
+        // and in the IB?
     }
 
     if (convert != TypeDesc::UNKNOWN)
@@ -1061,7 +1075,7 @@ interppixel_ (const ImageBuf &img, float x, float y, float *pixel,
               ImageBuf::WrapMode wrap)
 {
     int n = img.spec().nchannels;
-    float *localpixel = ALLOCA (float, n);
+    float *localpixel = ALLOCA (float, n*4);
     float *p[4] = { localpixel, localpixel+n, localpixel+2*n, localpixel+3*n };
     x -= 0.5f;
     y -= 0.5f;
