@@ -95,6 +95,7 @@ Oiiotool::clear_options ()
     printinfo_metamatch.clear ();
     printinfo_nometamatch.clear ();
     output_dataformat = TypeDesc::UNKNOWN;
+    output_channelformats.clear ();
     output_bitspersample = 0;
     output_scanline = false;
     output_tilewidth = 0;
@@ -104,6 +105,7 @@ Oiiotool::clear_options ()
     output_planarconfig = "default";
     output_adjust_time = false;
     output_autocrop = true;
+    output_autotrim = false;
     diff_warnthresh = 1.0e-6f;
     diff_warnpercent = 0;
     diff_hardwarn = std::numeric_limits<float>::max();
@@ -119,17 +121,15 @@ Oiiotool::clear_options ()
 std::string
 format_resolution (int w, int h, int x, int y)
 {
-#if 0
-    // This should work...
     return Strutil::format ("%dx%d%+d%+d", w, h, x, y);
-    // ... but tinyformat doesn't print the sign for '0' values!  It
-    // appears to be a bug with iostream use of 'showpos' format flag,
-    // specific to certain gcc libs, perhaps only on OSX.  Workaround:
-#else
-    return Strutil::format ("%dx%d%c%d%c%d", w, h,
-                            x >= 0 ? '+' : '-', abs(x),
-                            y >= 0 ? '+' : '-', abs(y));
-#endif
+}
+
+
+
+std::string
+format_resolution (int w, int h, int d, int x, int y, int z)
+{
+    return Strutil::format ("%dx%dx%d%+d%+d%+d", w, h, d, x, y, z);
 }
 
 
@@ -300,6 +300,32 @@ input_file (int argc, const char *argv[])
 
 
 static void
+string_to_dataformat (const std::string &s, TypeDesc &dataformat, int &bits)
+{
+    if (s == "uint8") {
+        dataformat = TypeDesc::UINT8;   bits = 0;
+    } else if (s == "int8") {
+        dataformat = TypeDesc::INT8;    bits = 0;
+    } else if (s == "uint10") {
+        dataformat = TypeDesc::UINT16;  bits = 10;
+    } else if (s == "uint12") {
+        dataformat = TypeDesc::UINT16;  bits = 12;
+    } else if (s == "uint16") {
+        dataformat = TypeDesc::UINT16;  bits = 0;
+    } else if (s == "int16") {
+        dataformat = TypeDesc::INT16;   bits = 0;
+    } else if (s == "half") {
+        dataformat = TypeDesc::HALF;    bits = 0;
+    } else if (s == "float") {
+        dataformat = TypeDesc::FLOAT;   bits = 0;
+    } else if (s == "double") {
+        dataformat = TypeDesc::DOUBLE;  bits = 0;
+    }
+}
+
+
+
+static void
 adjust_output_options (ImageSpec &spec, const Oiiotool &ot,
                        bool format_supports_tiles)
 {
@@ -310,8 +336,28 @@ adjust_output_options (ImageSpec &spec, const Oiiotool &ot,
         else
             spec.erase_attribute ("oiio:BitsPerSample");
     }
-
-//        spec.channelformats.clear ();   // FIXME: why?
+    if (ot.output_channelformats.size()) {
+        spec.channelformats.clear ();
+        spec.channelformats.resize (spec.nchannels, spec.format);
+        bool allsame = true;
+        for (int c = 0;  c < spec.nchannels;  ++c) {
+            if (c >= (int)spec.channelnames.size())
+                break;
+            std::map<std::string,std::string>::const_iterator i = ot.output_channelformats.find (spec.channelnames[c]);
+            if (i != ot.output_channelformats.end()) {
+                int bits = 0;
+                string_to_dataformat (i->second, spec.channelformats[c], bits);
+            }
+            if (c > 0)
+                allsame &= (spec.channelformats[c] == spec.channelformats[0]);
+        }
+        if (allsame) {
+            spec.format = spec.channelformats[0];
+            spec.channelformats.clear();
+        }
+    } else {
+        spec.channelformats.clear ();
+    }
 
     // If we've had tiled input and scanline was not explicitly
     // requested, we'll try tiled output.
@@ -402,6 +448,30 @@ output_file (int argc, const char *argv[])
     ImageRecRef saveimg = ot.curimg;
     ImageRecRef ir (ot.curimg);
 
+    // Handle --autotrim
+    if (supports_displaywindow && ot.output_autotrim) {
+        ROI origroi = get_roi(*ir->spec(0,0));
+        ROI roi = ImageBufAlgo::nonzero_region ((*ir)(0,0), origroi);
+        if (roi.npixels() == 0) {
+            // Special case -- all zero; but doctor to make it 1 zero pixel
+            roi = origroi;
+            roi.xend = roi.xbegin+1;
+            roi.yend = roi.ybegin+1;
+            roi.zend = roi.zbegin+1;
+        }
+        std::string crop = (ir->spec(0,0)->depth == 1)
+            ? format_resolution (roi.width(), roi.height(),
+                                 roi.xbegin, roi.ybegin)
+            : format_resolution (roi.width(), roi.height(), roi.depth(),
+                                 roi.xbegin, roi.ybegin, roi.zbegin);
+        const char *argv[] = { "crop", crop.c_str() };
+        int action_crop (int argc, const char *argv[]); // forward decl
+        action_crop (2, argv);
+        ir = ot.curimg;
+    }
+
+    // Automatically crop/pad if outputting to a format that doesn't
+    // support display windows, unless autocrop is disabled.
     if (! supports_displaywindow && ot.output_autocrop &&
         (ir->spec()->x != ir->spec()->full_x ||
          ir->spec()->y != ir->spec()->full_y ||
@@ -413,10 +483,16 @@ output_file (int argc, const char *argv[])
         ir = ot.curimg;
     }
 
+    // FIXME -- both autotrim and autocrop above neglect to handle
+    // MIPmaps or subimages with full generality.
+
     std::vector<ImageSpec> subimagespecs (ir->subimages());
     for (int s = 0;  s < ir->subimages();  ++s) {
         ImageSpec spec = *ir->spec(s,0);
         adjust_output_options (spec, ot, supports_tiles);
+        // For deep files, must copy the native deep channelformats
+        if (spec.deep)
+            spec.channelformats = (*ir)(s,0).nativespec().channelformats;
         subimagespecs[s] = spec;
     }
 
@@ -494,30 +570,36 @@ static int
 set_dataformat (int argc, const char *argv[])
 {
     ASSERT (argc == 2);
-    std::string s (argv[1]);
-    ot.output_bitspersample = 0;  // use the default
-    if (s == "uint8")
-        ot.output_dataformat = TypeDesc::UINT8;
-    else if (s == "int8")
-        ot.output_dataformat = TypeDesc::INT8;
-    else if (s == "uint10") {
-        ot.output_dataformat = TypeDesc::UINT16;
-        ot.output_bitspersample = 10;
-    } 
-    else if (s == "uint12") {
-        ot.output_dataformat = TypeDesc::UINT16;
-        ot.output_bitspersample = 12;
+    std::vector<std::string> chans;
+    Strutil::split (argv[1], chans, ",");
+
+    if (chans.size() == 0) {
+        return 0;   // Nothing to do
     }
-    else if (s == "uint16")
-        ot.output_dataformat = TypeDesc::UINT16;
-    else if (s == "int16")
-        ot.output_dataformat = TypeDesc::INT16;
-    else if (s == "half")
-        ot.output_dataformat = TypeDesc::HALF;
-    else if (s == "float")
-        ot.output_dataformat = TypeDesc::FLOAT;
-    else if (s == "double")
-        ot.output_dataformat = TypeDesc::DOUBLE;
+
+    if (chans.size() == 1 && !strchr(chans[0].c_str(),'=')) {
+        // Of the form:   -d uint8    (for example)
+        // Just one default format designated, apply to all channels
+        ot.output_dataformat = TypeDesc::UNKNOWN;
+        ot.output_bitspersample = 0;
+        string_to_dataformat (chans[0], ot.output_dataformat,
+                              ot.output_bitspersample);
+        ot.output_channelformats.clear ();
+        return 0;  // we're done
+    }
+
+    // If we make it here, the format designator was of the form
+    //    name0=type0,name1=type1,...
+    for (size_t i = 0;  i < chans.size();  ++i) {
+        const char *eq = strchr(chans[i].c_str(),'=');
+        if (eq) {
+            std::string channame (chans[i], 0, eq - chans[i].c_str());
+            ot.output_channelformats[channame] = std::string (eq+1);
+        } else {
+            ot.error (argv[0], Strutil::format ("Malformed format designator \"%s\"", chans[i]));
+        }
+    }
+
     return 0;
 }
 
@@ -899,15 +981,20 @@ action_colorconvert (int argc, const char *argv[])
 
     ColorProcessor *processor =
         ot.colorconfig.createColorProcessor (fromspace.c_str(), tospace.c_str());
-    if (! processor)
+    if (! processor) {
+        if (ot.colorconfig.error())
+            ot.error ("colorconvert", ot.colorconfig.geterror());
+        else
+            ot.error ("colorconvert", "Could not construct the color transform");
         return 1;
+    }
 
     for (int s = 0, send = A->subimages();  s < send;  ++s) {
         for (int m = 0, mend = A->miplevels(s);  m < mend;  ++m) {
             bool ok = ImageBufAlgo::colorconvert ((*ot.curimg)(s,m), (*A)(s,m), processor, false);
             if (! ok)
                 ot.error (argv[0], (*ot.curimg)(s,m).geterror());
-            ot.curimg->spec(s,m)->attribute ("oiio::Colorspace", tospace);
+            ot.curimg->spec(s,m)->attribute ("oiio:Colorspace", tospace);
         }
     }
 
@@ -930,6 +1017,68 @@ action_tocolorspace (int argc, const char *argv[])
     }
     const char *args[3] = { argv[0], "current", argv[1] };
     return action_colorconvert (3, args);
+}
+
+
+
+static int
+action_ociolook (int argc, const char *argv[])
+{
+    ASSERT (argc == 2);
+    if (ot.postpone_callback (1, action_ociolook, argc, argv))
+        return 0;
+    Timer timer (ot.enable_function_timing);
+
+    std::string lookname = argv[1];
+
+    std::map<std::string,std::string> options;
+    options["inverse"] = "0";
+    options["from"] = "current";
+    options["to"] = "current";
+    options["key"] = "";
+    options["value"] = "";
+    extract_options (options, argv[0]);
+    std::string fromspace = options["from"];
+    std::string tospace = options["to"];
+    std::string contextkey = options["key"];
+    std::string contextvalue = options["value"];
+    bool inverse = Strutil::from_string<int> (options["inverse"]) != 0;
+
+    ImageRecRef A = ot.curimg;
+    ot.read (A);
+    ot.pop ();
+    ot.push (new ImageRec (*A, ot.allsubimages ? -1 : 0,
+                           0, true, true|false));
+
+    if (fromspace == "current" || fromspace == "")
+        fromspace = A->spec(0,0)->get_string_attribute ("oiio:Colorspace", "Linear");
+    if (tospace == "current" || tospace == "")
+        tospace = A->spec(0,0)->get_string_attribute ("oiio:Colorspace", "Linear");
+
+    ColorProcessor *processor = ot.colorconfig.createLookTransform (
+            lookname.c_str(), fromspace.c_str(), tospace.c_str(),
+            inverse, contextkey.c_str(), contextvalue.c_str());
+    if (! processor) {
+        if (ot.colorconfig.error())
+            ot.error ("ociolook", ot.colorconfig.geterror());
+        else
+            ot.error ("ociolook", "Could not construct the look transform");
+        return 1;
+    }
+
+    for (int s = 0, send = A->subimages();  s < send;  ++s) {
+        for (int m = 0, mend = A->miplevels(s);  m < mend;  ++m) {
+            bool ok = ImageBufAlgo::colorconvert ((*ot.curimg)(s,m), (*A)(s,m), processor, false);
+            if (! ok)
+                ot.error (argv[0], (*ot.curimg)(s,m).geterror());
+            ot.curimg->spec(s,m)->attribute ("oiio::Colorspace", tospace);
+        }
+    }
+
+    ot.colorconfig.deleteColorProcessor (processor);
+
+    ot.function_times["ociolook"] += timer();
+    return 1;
 }
 
 
@@ -1271,6 +1420,144 @@ action_select_subimage (int argc, const char *argv[])
     ImageRecRef A = ot.pop();
     ot.push (new ImageRec (*A, subimage));
     ot.function_times["subimage"] += timer();
+    return 0;
+}
+
+
+
+static int
+action_subimage_append (int argc, const char *argv[])
+{
+    if (ot.postpone_callback (2, action_subimage_append, argc, argv))
+        return 0;
+    Timer timer (ot.enable_function_timing);
+
+    ImageRecRef B (ot.pop());
+    ImageRecRef A (ot.pop());
+    ot.read (A);
+    ot.read (B);
+
+    // Find the MIP levels in all the subimages of both A and B
+    std::vector<int> allmiplevels;
+    for (int s = 0;  s < A->subimages();  ++s) {
+        int miplevels = ot.allsubimages ? A->miplevels(s) : 1;
+        allmiplevels.push_back (miplevels);
+    }
+    for (int s = 0;  s < B->subimages();  ++s) {
+        int miplevels = ot.allsubimages ? B->miplevels(s) : 1;
+        allmiplevels.push_back (miplevels);
+    }
+
+    // Create the replacement ImageRec
+    ImageRecRef R (new ImageRec(A->name(), (int)allmiplevels.size(),
+                                &allmiplevels[0]));
+    ot.push (R);
+
+    // Subimage by subimage, MIP level by MIP level, copy
+    int sub = 0;
+    for (int s = 0;  s <  A->subimages();  ++s, ++sub) {
+        for (int m = 0;  m < A->miplevels(s);  ++m) {
+            bool ok = (*R)(sub,m).copy ((*A)(s,m));
+            if (! ok)
+                ot.error ("siappend", (*R)(sub,m).geterror());
+            // Tricky subtlety: IBA::channels changed the underlying IB,
+            // we may need to update the IRR's copy of the spec.
+            R->update_spec_from_imagebuf(sub,m);
+        }
+    }
+    for (int s = 0;  s <  B->subimages();  ++s, ++sub) {
+        for (int m = 0;  m < B->miplevels(s);  ++m) {
+            bool ok = (*R)(sub,m).copy ((*B)(s,m));
+            if (! ok)
+                ot.error ("siappend", (*R)(sub,m).geterror());
+            // Tricky subtlety: IBA::channels changed the underlying IB,
+            // we may need to update the IRR's copy of the spec.
+            R->update_spec_from_imagebuf(sub,m);
+        }
+    }
+
+    ot.function_times["siappend"] += timer();
+    return 0;
+}
+
+
+
+static int
+action_colorcount (int argc, const char *argv[])
+{
+    if (ot.postpone_callback (1, action_colorcount, argc, argv))
+        return 0;
+    Timer timer (ot.enable_function_timing);
+
+    ot.read ();
+    ImageBuf &Aib ((*ot.curimg)(0,0));
+    int nchannels = Aib.nchannels();
+
+    // We assume ';' to split, but for the sake of some command shells,
+    // that use ';' as a command separator, also accept ":".
+    std::vector<float> colorvalues;
+    std::vector<std::string> colorstrings;
+    if (strchr (argv[1], ':'))
+        Strutil::split (argv[1], colorstrings, ":");
+    else
+        Strutil::split (argv[1], colorstrings, ";");
+    int ncolors = (int) colorstrings.size();
+    for (int col = 0; col < ncolors; ++col) {
+        std::vector<float> color (nchannels, 0.0f);
+        Strutil::extract_from_list_string (color, colorstrings[col], ",");
+        for (int c = 0;  c < nchannels;  ++c)
+            colorvalues.push_back (c < (int)color.size() ? color[c] : 0.0f);
+    }
+
+    std::vector<float> eps (nchannels, 0.001f);
+    std::map<std::string,std::string> options;
+    extract_options (options, argv[0]);
+    Strutil::extract_from_list_string (eps, options["eps"]);
+
+    imagesize_t *count = ALLOCA (imagesize_t, ncolors);
+    bool ok = ImageBufAlgo::color_count ((*ot.curimg)(0,0), count,
+                                         ncolors, &colorvalues[0], &eps[0]);
+    if (ok) {
+        for (int col = 0;  col < ncolors;  ++col)
+            std::cout << Strutil::format("%8d  %s\n", count[col], colorstrings[col]);
+    } else {
+        ot.error ("colorcount", (*ot.curimg)(0,0).geterror());
+    }
+
+    ot.function_times["colorcount"] += timer();
+    return 0;
+}
+
+
+
+static int
+action_rangecheck (int argc, const char *argv[])
+{
+    if (ot.postpone_callback (1, action_rangecheck, argc, argv))
+        return 0;
+    Timer timer (ot.enable_function_timing);
+
+    ot.read ();
+    ImageBuf &Aib ((*ot.curimg)(0,0));
+    int nchannels = Aib.nchannels();
+
+    std::vector<float> low(nchannels,0.0f), high(nchannels,1.0f);
+    Strutil::extract_from_list_string (low, argv[1], ",");
+    Strutil::extract_from_list_string (high, argv[2], ",");
+
+    imagesize_t lowcount = 0, highcount = 0, inrangecount = 0;
+    bool ok = ImageBufAlgo::color_range_check ((*ot.curimg)(0,0), &lowcount,
+                                               &highcount, &inrangecount,
+                                               &low[0], &high[0]);
+    if (ok) {
+        std::cout << Strutil::format("%8d  < %s\n", lowcount, argv[1]);
+        std::cout << Strutil::format("%8d  > %s\n", highcount, argv[2]);
+        std::cout << Strutil::format("%8d  within range\n", inrangecount);
+    } else {
+        ot.error ("rangecheck", (*ot.curimg)(0,0).geterror());
+    }
+
+    ot.function_times["rangecheck"] += timer();
     return 0;
 }
 
@@ -1874,7 +2161,7 @@ action_capture (int argc, const char *argv[])
 
 
 
-static int
+int
 action_crop (int argc, const char *argv[])
 {
     if (ot.postpone_callback (1, action_crop, argc, argv))
@@ -1950,8 +2237,10 @@ action_resample (int argc, const char *argv[])
 
     adjust_geometry (newspec.width, newspec.height,
                      newspec.x, newspec.y, argv[1], true);
-    if (newspec.width == Aspec.width && newspec.height == Aspec.height)
+    if (newspec.width == Aspec.width && newspec.height == Aspec.height) {
+        ot.push (A);  // Restore the original image
         return 0;  // nothing to do
+    }
 
     // Shrink-wrap full to match actual pixels; I'm not sure what else
     // is appropriate, need to think it over.
@@ -1998,8 +2287,10 @@ action_resize (int argc, const char *argv[])
 
     adjust_geometry (newspec.width, newspec.height,
                      newspec.x, newspec.y, argv[1], true);
-    if (newspec.width == Aspec.width && newspec.height == Aspec.height)
+    if (newspec.width == Aspec.width && newspec.height == Aspec.height) {
+        ot.push (A);  // Restore the original image
         return 0;  // nothing to do
+    }
 
     // Shrink-wrap full to match actual pixels; I'm not sure what else
     // is appropriate, need to think it over.
@@ -2250,9 +2541,9 @@ action_unsharp (int argc, const char *argv[])
     options["threshold"] = "0";
     extract_options (options, argv[0]);
     std::string kernel = options["kernel"];
-    float width = strtof (options["width"].c_str(), NULL);
-    float contrast = strtof (options["contrast"].c_str(), NULL);
-    float threshold = strtof (options["threshold"].c_str(), NULL);
+    float width = (float) strtod (options["width"].c_str(), NULL);
+    float contrast = (float) strtod (options["contrast"].c_str(), NULL);
+    float threshold = (float) strtod (options["threshold"].c_str(), NULL);
 
     ImageRecRef A = ot.pop();
     A->read();
@@ -2373,10 +2664,11 @@ action_fillholes (int argc, const char *argv[])
     // Read and copy the top-of-stack image
     ImageRecRef A (ot.pop());
     ot.read (A);
-    ImageRecRef B (new ImageRec (*A, 0, 0, true, false /*copy_pixels*/));
+    ImageSpec spec = (*A)(0,0).spec();
+    set_roi (spec, roi_union (get_roi(spec), get_roi_full(spec)));
+    ImageRecRef B (new ImageRec("filled", spec, ot.imagecache));
     ot.push (B);
     ImageBuf &Rib ((*B)(0,0));
-
     bool ok = ImageBufAlgo::fillholes_pushpull (Rib, (*A)(0,0));
     if (! ok)
         ot.error (argv[0], Rib.geterror());
@@ -2623,7 +2915,7 @@ action_clamp (int argc, const char *argv[])
         extract_options (options, argv[0]);
         Strutil::extract_from_list_string (min, options["min"]);
         Strutil::extract_from_list_string (max, options["max"]);
-        bool clampalpha01 = strtol (options["clampalpha"].c_str(), NULL, 10);
+        bool clampalpha01 = strtol (options["clampalpha"].c_str(), NULL, 10) != 0;
 
         for (int m = 0, miplevels=R->miplevels(s);  m < miplevels;  ++m) {
             ImageBuf &Rib ((*R)(s,m));
@@ -2654,7 +2946,7 @@ action_rangecompress (int argc, const char *argv[])
     std::map<std::string,std::string> options;
     extract_options (options, argv[0]);
     std::string useluma_str = options["luma"];
-    bool useluma = useluma_str.size() ? atoi(useluma_str.c_str()) : true;
+    bool useluma = useluma_str.size() ? atoi(useluma_str.c_str()) != 0 : true;
 
     ImageRecRef A = ot.pop();
     ImageRecRef R (new ImageRec (*A, ot.allsubimages ? -1 : 0,
@@ -2691,7 +2983,7 @@ action_rangeexpand (int argc, const char *argv[])
     std::map<std::string,std::string> options;
     extract_options (options, argv[0]);
     std::string useluma_str = options["luma"];
-    bool useluma = useluma_str.size() ? atoi(useluma_str.c_str()) : true;
+    bool useluma = useluma_str.size() ? atoi(useluma_str.c_str()) != 0 : true;
 
     ImageRecRef A = ot.pop();
     ImageRecRef R (new ImageRec (*A, ot.allsubimages ? -1 : 0,
@@ -2728,48 +3020,17 @@ action_text (int argc, const char *argv[])
     const ImageSpec &Rspec = Rib.spec();
 
     // Set up defaults for text placement, size, font, color
-    int x = Rspec.x + Rspec.width/2;
-    int y = Rspec.y + Rspec.height/2;
-    int fontsize = 16;
-    std::string font = "";
-    float *textcolor = ALLOCA (float, Rspec.nchannels);
-    for (int c = 0;  c < Rspec.nchannels;  ++c)
-        textcolor[c] = 1.0f;
-
-    // Parse optional arguments for overrides
-    std::string command = argv[0];
-    size_t pos;
-    while ((pos = command.find_first_of(":")) != std::string::npos) {
-        command = command.substr (pos+1, std::string::npos);
-        if (Strutil::istarts_with(command,"x=")) {
-            x = atoi (command.c_str()+2);
-        } else if (Strutil::istarts_with(command,"y=")) {
-            y = atoi (command.c_str()+2);
-        } else if (Strutil::istarts_with(command,"size=")) {
-            fontsize = atoi (command.c_str()+5);
-        } else if (Strutil::istarts_with(command,"color=")) {
-            // Parse comma-separated color list
-            size_t numpos = 6;
-            for (int c = 0; c < Rspec.nchannels && numpos < command.size() && command[numpos] != ':'; ++c) {
-                textcolor[c] = (float) atof (command.c_str()+numpos);
-                while (numpos < command.size() && command[numpos] != ':' && command[numpos] != ',')
-                    ++numpos;
-                if (numpos < command.size())
-                    ++numpos;
-            }
-        } else if (Strutil::istarts_with(command,"font=")) {
-            font = "";
-            size_t s = 5;
-            bool quote = (command[s] == '\"');
-            if (quote)
-                ++s;
-            for ( ; s < command.size() && command[s] != ':' && command[s] != '\"'; ++s)
-                font += command[s];
-        }
-    }
+    std::map<std::string,std::string> options;
+    extract_options (options, argv[0]);
+    int x = options["x"].size() ? Strutil::from_string<int>(options["x"]) : (Rspec.x + Rspec.width/2);
+    int y = options["y"].size() ? Strutil::from_string<int>(options["y"]) : (Rspec.y + Rspec.height/2);
+    int fontsize = options["size"].size() ? Strutil::from_string<int>(options["size"]) : 16;
+    std::string font = options["font"];
+    std::vector<float> textcolor (Rspec.nchannels, 1.0f);
+    Strutil::extract_from_list_string (textcolor, options["color"]);
 
     bool ok = ImageBufAlgo::render_text (Rib, x, y, argv[1] /* the text */,
-                                         fontsize, font, textcolor);
+                                         fontsize, font, &textcolor[0]);
     if (! ok)
         ot.error (argv[0], Rib.geterror());
 
@@ -2890,6 +3151,10 @@ getargs (int argc, char *argv[])
                     "Regex: which metadata is excluded with -info -v",
                 "--stats", &ot.printstats, "Print pixel statistics on all inputs",
                 "--hash", &ot.hash, "Print SHA-1 hash of each input image",
+                "--colorcount %@ %s", action_colorcount, NULL,
+                    "Count of how many pixels have the given color (argument: color;color;...) (optional args: eps=color)",
+                "--rangecheck %@ %s %s", action_rangecheck, NULL, NULL,
+                    "Count of how many pixels are outside the low and high color arguments (each is a comma-separated color value list)",
 //                "-u", &ot.updatemode, "Update mode: skip outputs when the file exists and is newer than all inputs",
                 "--no-clobber", &ot.noclobber, "Do not overwrite existing files",
                 "--noclobber", &ot.noclobber, "", // synonym
@@ -2900,8 +3165,9 @@ getargs (int argc, char *argv[])
                 "-o %@ %s", output_file, NULL, "Output the current image to the named file",
                 "<SEPARATOR>", "Options that affect subsequent image output:",
                 "-d %@ %s", set_dataformat, NULL,
-                    "Set the output data format to one of: "
-                    "uint8, sint8, uint10, uint12, uint16, sint16, half, float, double",
+                    "'-d TYPE' sets the output data format of all channels, "
+                    "'-d CHAN=TYPE' overrides a single named channel (multiple -d args are allowed). "
+                    "Data types include: uint8, sint8, uint10, uint12, uint16, sint16, half, float, double",
                 "--scanline", &ot.output_scanline, "Output scanline images",
                 "--tile %@ %d %d", output_tiles, &ot.output_tilewidth, &ot.output_tileheight,
                     "Output tiled images (tilewidth, tileheight)",
@@ -2913,6 +3179,8 @@ getargs (int argc, char *argv[])
                     "Adjust file times to match DateTime metadata",
                 "--noautocrop %!", &ot.output_autocrop, 
                     "Do not automatically crop images whose formats don't support separate pixel data and full/display windows",
+                "--autotrim", &ot.output_autotrim, 
+                    "Automatically trim black borders upon output to file formats that support separate pixel data and full/display windows",
                 "<SEPARATOR>", "Options that change current image metadata (but not pixel values):",
                 "--attrib %@ %s %s", set_any_attribute, NULL, NULL, "Sets metadata attribute (name, value)",
                 "--sattrib %@ %s %s", set_string_attribute, NULL, NULL, "Sets string metadata attribute (name, value)",
@@ -3000,6 +3268,8 @@ getargs (int argc, char *argv[])
                 "--selectmip %@ %d", action_selectmip, NULL,
                     "Select just one MIP level (0 = highest res)",
                 "--subimage %@ %d", action_select_subimage, NULL, "Select just one subimage",
+                "--siappend %@", action_subimage_append, NULL,
+                    "Append the last two images into one multi-subimage image",
                 "--pop %@", action_pop, NULL,
                     "Throw away the current image",
                 "--dup %@", action_dup, NULL,
@@ -3013,6 +3283,8 @@ getargs (int argc, char *argv[])
                     "Convert the current image's pixels to a named color space",
                 "--colorconvert %@ %s %s", action_colorconvert, NULL, NULL,
                     "Convert pixels from 'src' to 'dst' color space (without regard to its previous interpretation)",
+                "--ociolook %@ %s", action_ociolook, NULL,
+                    "Apply the named OCIO look (optional args: from=, to=, inverse=, key=, value=)",
                 "--unpremult %@", action_unpremult, NULL,
                     "Divide all color channels of the current image by the alpha to \"un-premultiply\"",
                 "--premult %@", action_premult, NULL,
@@ -3020,9 +3292,9 @@ getargs (int argc, char *argv[])
                 NULL);
 
     if (ap.parse(argc, (const char**)argv) < 0) {
-	std::cerr << ap.geterror() << std::endl;
+        std::cerr << ap.geterror() << std::endl;
         ap.usage ();
-        exit (EXIT_FAILURE);
+        exit (EXIT_SUCCESS);
     }
     if (help || argc <= 1) {
         ap.usage ();
@@ -3043,133 +3315,22 @@ getargs (int argc, char *argv[])
         int columns = Sysutil::terminal_columns() - 2;
         std::cout << Strutil::wordwrap(s.str(), columns, 4) << "\n";
 
-        exit (EXIT_FAILURE);
-    }
-
-}
-
-
-
-// Given a sequence description, generate numbers.
-static void
-generate_sequence (std::string seqdesc, int framepadding,
-                   std::vector<std::string> &numbers)
-{
-    numbers.clear ();
-    std::string format = Strutil::format ("%%0%dd", framepadding);
-
-    // Split the sequence description into comma-separated subranges.
-    std::vector<std::string> sequences;
-    Strutil::split (seqdesc, sequences, ",");
-
-    // For each subrange...
-    BOOST_FOREACH (std::string s, sequences) {
-        // It's START, START-END, or START-ENDxSTEP
-        std::vector<std::string> range;
-        Strutil::split (s, range, "-");
-        int first = strtol (range[0].c_str(), NULL, 10);
-        int last = first;
-        int step = 1;
-        if (range.size() > 1) {
-            last = strtol (range[1].c_str(), NULL, 10);
-            if (const char *x = strchr (range[1].c_str(), 'x'))
-                step = std::max (1, (int) strtol (x+1, NULL, 10));
-        }
-        for (int i = first; i <= last; i += step)
-            numbers.push_back (Strutil::format (format.c_str(), i));
-    }
-    // std::cout << "Sequence " << Strutil::join(numbers, " ") << "\n";
-}
-
-
-
-// Given a pattern (such as "foo.#.tif" or "bar.1-10#.exr"), produce a
-// list of matching filenames.  Explicit ranges enumerate the range,
-// whereas full numeric wildcards search for existing files.
-static bool
-deduce_sequence (std::string pattern, int framepadding,
-                 std::vector<std::string> &filenames,
-                 std::vector<std::string> &numbers)
-{
-    filenames.clear ();
-
-    // Isolate the directory name (or '.' if none was specified)
-    std::string directory = Filesystem::parent_path (pattern);
-    if (directory.size() == 0) {
-        directory = ".";
-        pattern = "./" + pattern;
-    }
-
-    // The pattern is either a range (e.g., "1-15#"), or just a 
-    // set of hash marks (e.g. "####").
-    static boost::regex range_re ("([0-9]+)\\-([0-9]+)#+");
-    static boost::regex hash_re ("#+");
-
-    boost::match_results<std::string::const_iterator> range_match;
-    if (boost::regex_search (pattern, range_match, range_re)) {
-        // It's a range. Generate the names by iterating through the
-        // numbers.  
-        std::string prefix (range_match.prefix().first, range_match.prefix().second);
-        std::string suffix (range_match.suffix().first, range_match.suffix().second);
-        std::string r1 (range_match[1].first, range_match[1].second);
-        std::string r2 (range_match[2].first, range_match[2].second);
-        int rangefirst = (int) strtol (r1.c_str(), NULL, 10);
-        int rangelast = (int) strtol (r2.c_str(), NULL, 10);
-        // Only save the numbers if it's not already filled in.
-        bool save_numbers = (numbers.size() == 0);
-
-        // There are two cases: either the files exist, or they don't.
-        // Check the first one and assume it's the same for all.
-        for (int r = rangefirst; r <= rangelast; ++r) {
-            // Try up to 4 leading zeroes
-            std::string f, num;
-            for (int i = 1; i <= framepadding; ++i) {
-                std::string fmt = Strutil::format ("%%0%dd", i);
-                std::string num = Strutil::format (fmt.c_str(), r);
-                f = prefix + num + suffix;
-                if (Filesystem::exists (f))
-                    break;  // found it
+        int nlooks = ot.colorconfig.getNumLooks();
+        if (nlooks) {
+            std::stringstream s;
+            s << "Known looks: ";
+            for (int i = 0;  i < nlooks;  ++i) {
+                const char *n = ot.colorconfig.getLookNameByIndex(i);
+                s << "\"" << n << "\"";
+                if (i < nlooks-1)
+                    s << ", ";
             }
-            // At this point, we either have an f that exists, or f is
-            // the file with 4 digit number.
-            filenames.push_back (f);
-            if (save_numbers)
-                numbers.push_back (f);
+            std::cout << Strutil::wordwrap(s.str(), columns, 4) << "\n";
         }
 
-    } else if (numbers.size()) {
-        // Numeric wildcard, and an earlier argument has already
-        // expanded into a specific series of numbers.  We MUST make
-        // this wildcard expand to the same set of numbers.
-        for (size_t i = 0; i < numbers.size(); ++i) {
-            std::string f = boost::regex_replace (pattern, hash_re, numbers[i]);
-            filenames.push_back (f);
-        }
-
-    } else {
-        // Numeric wildcard, but we don't yet have a prescribed frame
-        // range, so search the directories for matches.
-
-        pattern = boost::regex_replace (pattern, hash_re, "([0-9]+)");
-        pattern = "^" + pattern + "$";
-        bool ok = Filesystem::get_directory_entries (directory, filenames,
-                                                     false, pattern);
-        if (! ok)
-            return false;
-
-        boost::regex pattern_re (pattern);
-        for (size_t i = 0; i < filenames.size(); ++i) {
-            boost::match_results<std::string::const_iterator> match;
-            bool ok = boost::regex_search (filenames[i], match, pattern_re);
-            ASSERT (ok);  // should have matched
-            std::string num (match[1].first, match[1].second);
-            numbers.push_back (num);
-        }
+        exit (EXIT_SUCCESS);
     }
 
-
-//    std::cout << "Matches: \n\t" << Strutil::join (filenames, "\n\t") << "\n";
-    return true;
 }
 
 
@@ -3180,21 +3341,21 @@ deduce_sequence (std::string pattern, int framepadding,
 static bool 
 handle_sequence (int argc, const char **argv)
 {
-    // First, scan the original command line arguments for '#'
-    // characters.  Any found indicate that there are numeric rnage or
+    // First, scan the original command line arguments for '#' or '@'
+    // characters.  Any found indicate that there are numeric range or
     // wildcards to deal with.  Also look for --frames and --framepadding
     // options.
-    std::string framenumbers_string;
-    int framepadding = 4;
+    std::string framespec = "";
+    int framepadding = 0;
     std::vector<int> sequence_args;  // Args with sequence numbers
     bool is_sequence = false;
     for (int a = 1;  a < argc;  ++a) {
-        if (strchr (argv[a], '#')) {
+        if (strchr (argv[a], '#') || strchr (argv[a], '@')) {
             is_sequence = true;
             sequence_args.push_back (a);
         }
         if (! strcmp (argv[a], "--frames") && a < argc-1) {
-            framenumbers_string = argv[++a];
+            framespec = argv[++a];
         }
         else if (! strcmp (argv[a], "--framepadding") && a < argc-1) {
             int f = atoi (argv[++a]);
@@ -3207,21 +3368,18 @@ handle_sequence (int argc, const char **argv)
     if (! is_sequence)
         return false;
 
-    std::vector<std::string> numbers;
-
-    // If an explicit frame sequence was given, elaborate it.
-    if (framenumbers_string.size())
-        generate_sequence (framenumbers_string, framepadding, numbers);
-
     // For each of the arguments that contains a wildcard, use
     // deduce_sequence to fully elaborate all the filenames in the
     // sequence.  It's an error if the sequences are not all of the
     // same length.
-    std::vector< std::vector<std::string> > filenames (argc+1);
+    std::vector< std::vector<std::string> > filenames (argc+1); 
+    std::vector<int> frame_numbers;
     size_t nfilenames = 0;
     for (size_t i = 0;  i < sequence_args.size();  ++i) {
         int a = sequence_args[i];
-        deduce_sequence (argv[a], framepadding, filenames[a], numbers);
+        Filesystem::enumerate_file_sequence (argv[a], framespec.c_str(),
+                                             framepadding, frame_numbers,
+                                             filenames[a]);
         if (i == 0) {
             nfilenames = filenames[a].size();
         } else if (nfilenames != filenames[a].size()) {
@@ -3247,6 +3405,9 @@ handle_sequence (int argc, const char **argv)
             std::cout << "oiiotool WARNING: pending '" << ot.pending_callback_name()
                       << "' command never executed.\n";
         }
+        // Clear the stack at the end of each iteration
+        ot.curimg.reset ();
+        ot.image_stack.clear();
     }
 
     return true;
@@ -3257,6 +3418,12 @@ handle_sequence (int argc, const char **argv)
 int
 main (int argc, char *argv[])
 {
+// When Visual Studio is used float values in scientific format are printed 
+// with three digit exponent. We change this behavior to fit the Linux way.
+#ifdef _MSC_VER
+    _set_output_format (_TWO_DIGIT_EXPONENT);
+#endif
+
     Timer totaltime;
 
     ot.imagecache = ImageCache::create (false);
@@ -3265,6 +3432,7 @@ main (int argc, char *argv[])
     ot.imagecache->attribute ("m_max_memory_MB", 4096.0);
 //    ot.imagecache->attribute ("autotile", 1024);
 
+    Filesystem::convert_native_arguments (argc, (const char **)argv);
     if (handle_sequence (argc, (const char **)argv)) {
         // Deal with sequence
 
@@ -3279,8 +3447,8 @@ main (int argc, char *argv[])
     }
 
     if (ot.runstats) {
-        float total_time = totaltime();
-        float unaccounted = total_time;
+        double total_time = totaltime();
+        double unaccounted = total_time;
         std::cout << "\n";
         int threads = -1;
         OIIO::getattribute ("threads", threads);
@@ -3290,11 +3458,11 @@ main (int argc, char *argv[])
         static const char *timeformat = "      %-12s : %5.2f\n";
         for (Oiiotool::TimingMap::const_iterator func = ot.function_times.begin();
              func != ot.function_times.end();  ++func) {
-            float t = func->second;
+            double t = func->second;
             std::cout << Strutil::format (timeformat, func->first, t);
             unaccounted -= t;
         }
-        std::cout << Strutil::format (timeformat, "unaccounted", std::max(unaccounted,0.0f));
+        std::cout << Strutil::format (timeformat, "unaccounted", std::max(unaccounted, 0.0));
         std::cout << ot.imagecache->getstats() << "\n";
     }
 

@@ -381,7 +381,7 @@ public:
     /// the image.  (Note that this differs slightly from the member
     /// data channelformats, which is empty if there are not separate
     /// per-channel formats.)
-    void get_channelformats (std::vector<TypeDesc> &formats) {
+    void get_channelformats (std::vector<TypeDesc> &formats) const {
         formats = channelformats;
         if ((int)formats.size() < nchannels)
             formats.resize (nchannels, format);
@@ -774,6 +774,11 @@ public:
         return e;
     }
 
+    /// An ImageInput::Creator is a function that creates and returns an
+    /// ImageInput.  Once invoked, the resulting ImageInput is owned by
+    /// the caller, who is responsible for deleting it when done with it.
+    typedef ImageInput* (*Creator)();
+
 protected:
     /// Error reporting for the plugin implementation: call this with
     /// printf-like arguments.  Note however that this is fully typesafe!
@@ -1064,6 +1069,11 @@ public:
         return e;
     }
 
+    /// An ImageOutput::Creator is a function that creates and returns an
+    /// ImageOutput.  Once invoked, the resulting ImageOutput is owned by
+    /// the caller, who is responsible for deleting it when done with it.
+    typedef ImageOutput* (*Creator)();
+
 protected:
     /// Error reporting for the plugin implementation: call this with
     /// printf-like arguments.  Note however that this is fully typesafe!
@@ -1178,6 +1188,15 @@ inline bool getattribute (const std::string &name, std::string &val) {
         val = s ? s : "";
     return ok;
 }
+
+
+/// Register the input and output 'create' routines and list of file
+/// extensions for a particular format.
+OIIO_API void declare_imageio_format (const std::string &format_name,
+                                      ImageInput::Creator input_creator,
+                                      const char **input_extensions,
+                                      ImageOutput::Creator output_creator,
+                                      const char **output_extensions);
 
 
 /// Helper routine: quantize a value to an integer given the

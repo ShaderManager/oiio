@@ -2,14 +2,14 @@ project (OpenImageIO)
 
 # Release version of the library
 set (OIIO_VERSION_MAJOR 1)
-set (OIIO_VERSION_MINOR 2)
-set (OIIO_VERSION_PATCH 0)
+set (OIIO_VERSION_MINOR 3)
+set (OIIO_VERSION_PATCH 2)
+set (OIIO_VERSION_RELEASE_TYPE "dev")   # "dev", "betaX", "RCY", ""
 
 cmake_minimum_required (VERSION 2.6)
 if (NOT CMAKE_VERSION VERSION_LESS 2.8.4)
     cmake_policy (SET CMP0017 NEW)
 endif ()
-set (CMAKE_ALLOW_LOOSE_LOOP_CONSTRUCTS TRUE)
 message (STATUS "Project source dir = ${PROJECT_SOURCE_DIR}")
 message (STATUS "Project build dir = ${CMAKE_BINARY_DIR}")
 
@@ -29,6 +29,11 @@ if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     add_definitions ("-DNDEBUG")
 endif ()
 
+option (CMAKE_USE_FOLDERS "Use the FOLDER target property to organize targets into folders." ON)
+mark_as_advanced (CMAKE_USE_FOLDERS)
+if (CMAKE_USE_FOLDERS)
+    set_property (GLOBAL PROPERTY USE_FOLDERS ON)
+endif ()
 
 # Figure out which compiler we're using
 if (CMAKE_COMPILER_IS_GNUCC)
@@ -82,7 +87,7 @@ set (HIDE_SYMBOLS OFF CACHE BOOL "Hide symbols not in the public API")
 set (USE_OPENGL ON CACHE BOOL "Include OpenGL support")
 set (USE_QT ON CACHE BOOL "Include Qt support")
 set (FORCE_OPENGL_1 OFF CACHE BOOL "Force iv to use OpenGL's fixed pipeline")
-set (USE_TBB ON CACHE BOOL "Use TBB if needed")
+set (USE_TBB OFF CACHE BOOL "Use TBB if needed")
 set (USE_PYTHON ON CACHE BOOL "Build the Python bindings")
 set (USE_FIELD3D ON CACHE BOOL "Use Field3D if found")
 set (USE_OPENJPEG ON CACHE BOOL "Use OpenJpeg if found")
@@ -94,6 +99,7 @@ set (NOTHREADS OFF CACHE BOOL "Compile with no threads or locking")
 set (PYTHON_VERSION 2.6)
 set (USE_EXTERNAL_PUGIXML OFF CACHE BOOL
      "Use an externally built shared library version of the pugixml library")
+set (PUGIXML_HOME "" CACHE STRING "Hint about where to find external PugiXML library")
 set (USE_EXTERNAL_TBB OFF CACHE BOOL
      "Use system TBB library instead of bundled.")
 
@@ -337,6 +343,7 @@ oiio_add_tests (gpsread misnamed-file nonwhole-tiles
                 texture-missing texture-overscan
                 texture-pointsample texture-width0blur texture-res
                 texture-skinny texture-fat texture-wrapfill
+                texture-icwrite
                )
 
 

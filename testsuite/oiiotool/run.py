@@ -16,6 +16,18 @@ command += (oiio_app("oiiotool")
             + " --create 256x256 3 --fill:color=1,.5,.5 256x256"
             + " --fill:color=0,1,0 80x80+100+100 -d uint8 -o filled.tif >> out.txt ;\n")
 
+# test --autotrim
+command += (oiio_app("oiiotool")
+            + " black.tif --fill:color=0,1,0 80x80+100+100 --autotrim -d uint8 -o autotrim.tif >> out.txt ;\n")
+
+# test --colorcount  (using the results of the --fill test)
+command += (oiio_app("oiiotool")
+            + " filled.tif --colorcount:eps=.1,.1,.1 0,0,0:1,.5,.5:0,1,0 >> out.txt ;\n")
+
+# test --rangecheck  (using the results of the --fill test)
+command += (oiio_app("oiiotool")
+            + " filled.tif --rangecheck 0,0,0 1,0.9,1 >> out.txt ;\n")
+
 # test resample
 command += (oiio_app ("oiiotool") + " " 
             + parent + "/oiio-images/grid.tif"
@@ -123,6 +135,32 @@ command += (oiio_app ("oiiotool") + " "
             + parent + "/oiio-images/grid.tif"
             + " --ch =0.25,B,G -o chanshuffle.tif >> out.txt ;\n")
 
+# test --ch to separate RGBA from an RGBAZ file
+command += (oiio_app("oiiotool") 
+            + "src/rgbaz.exr --ch R,G,B,A -o ch-rgba.exr >> out.txt ;\n")
+command += (oiio_app("oiiotool") 
+            + "src/rgbaz.exr --ch Z -o ch-z.exr >> out.txt ;\n")
+
+# test --chappend to merge RGBA and Z
+command += (oiio_app("oiiotool") + "ch-rgba.exr ch-z.exr "
+            + "--chappend -o chappend-rgbaz.exr >> out.txt ;\n")
+
+# test --chnames to rename channels
+command += (oiio_app("oiiotool") 
+            + "src/rgbaz.exr --chnames Red,,,,Depth -o chname.exr >> out.txt ;\n")
+command += info_command ("chname.exr", safematch=1)
+
+# test -d to change data formats
+command += (oiio_app("oiiotool") + "src/rgbaz.exr "
+            + "-d half -o allhalf.exr >> out.txt ;\n")
+command += info_command ("allhalf.exr", safematch=1)
+
+# test -d NAME=fmt to change data format of one channel, and to make
+# sure oiiotool will output per-channel formats.
+command += (oiio_app("oiiotool") + "src/rgbaz.exr "
+            + "-d half -d Z=float -o rgbahalf-zfloat.exr >> out.txt ;\n")
+command += info_command ("rgbahalf-zfloat.exr", safematch=1)
+
 # test hole filling
 command += (oiio_app ("oiiotool") + " " 
             + "ref/hole.tif --fillholes -o tahoe-filled.tif >> out.txt ;\n")
@@ -172,7 +210,9 @@ command += (oiio_app ("oiiotool")
 # test sequences
 command += (oiio_app("oiiotool")
             + "fit.tif -o copyA.1-10#.jpg >> out.txt ;\n");
-command += (oiio_app("oiiotool") + " --info copyA.*.jpg >> out.txt ;\n")
+command += (oiio_app("oiiotool") + " --info "
+            + " ".join(["copyA.{0:04}.jpg".format(x) for x in range(1,11)])
+            + " >> out.txt ;\n")
 
 # To add more tests, just append more lines like the above and also add
 # the new 'feature.tif' (or whatever you call it) to the outputs list,
@@ -180,14 +220,17 @@ command += (oiio_app("oiiotool") + " --info copyA.*.jpg >> out.txt ;\n")
 
 
 # Outputs to check against references
-outputs = [ "filled.tif", "resample.tif", "resize.tif", "resize2.tif",
+outputs = [ "filled.tif", "autotrim.tif",
+            "resample.tif", "resize.tif", "resize2.tif",
             "resize64.tif", "resize512.tif",
             "fit.tif", "fit2.tif",
             "histogram_regular.tif", "histogram_cumulative.tif",
             "pasted.tif", "mosaic.tif",
             "flip.tif", "flop.tif", "flipflop.tif", "transpose.tif",
             "cshift.tif",
-            "chanshuffle.tif", "cmul1.exr", "cmul2.exr",
+            "chanshuffle.tif", "ch-rgba.exr", "ch-z.exr",
+            "chappend-rgbaz.exr", "chname.exr",
+            "cmul1.exr", "cmul2.exr",
             "cadd1.exr", "cadd2.exr",
             "add.exr", "sub.exr",
             "tahoe-filled.tif",

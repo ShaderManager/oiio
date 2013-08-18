@@ -58,16 +58,17 @@ images.  In effect, this will execute the \oiiotool command several
 times, making substitutions to the sequence arguments in turn.
 
 Image sequences are specified by having filename arguments to
-oiiotool use either a numeric wildcard (designated by ``{\cf \#}'') or an
-explicit numeric range (designated such as ``{\cf 1-10\#}''), or
-spelling out a more complex pattern with {\cf --frames}.  For example:
+oiiotool use either a numeric range wildcard (designated such as
+``{\cf 1-10\#}''), or spelling out a more complex pattern with 
+{\cf --frames}.  For example:
 
 \begin{code}
-    oiiotool big.#.tif --resize 100x100 -o small.#.tif
+    oiiotool big.1-3#.tif --resize 100x100 -o small.1-3#.tif
+
+    oiiotool --frames 1-3 big.#.tif --resize 100x100 -o small.#.tif
 \end{code}
 
-\noindent If there are files {\cf big0001.tif}, {\cf big0002.tif}, and
-{\cf big0003.tif}, will be the equivalent of having issued the following
+\noindent Either of those will be the equivalent of having issued the following
 sequence of commands:
 
 \begin{code}
@@ -76,19 +77,16 @@ sequence of commands:
     oiiotool big.0003.tif --resize 100x100 -o small.0003.tif
 \end{code}
 
-\noindent The following is also equivalent:
+The frame range may be forwards ({\cf 1-5}) or backwards ({\cf 5-1}),
+and may give a step size to skip frames ({\cf 1-5x2} means 1, 3, 5) or
+take the complement of the step size set ({\cf 1-5y2} means 2, 4) and
+may combine subsequences with a comma.
 
-\begin{code}
-    oiiotool big.1-3#.tif --resize 100x100 -o small.1-3#.tif
-\end{code}
-
-You can also explicitly use the {\cf --frames} to specify a frame
-sequence very flexibly as a sequence of comma-separated subsequences,
-where each subsequence is a single frame (e.g., {\cf 100}), a range of
-frames ({\cf 100-150}), or a frame range with step size ({\cf 100-150x4}).
-An optional {\cf --framepadding} can be used to change the default number
-of digits (with leading zeroes applied) that the frame numbers should
-have.  It defaults to 4.
+The wildcard characters themselves specify how many digits to pad
+with leading zeroes, with {\cf \#} indicating 4 digits and {\cf @}
+indicating one digit (these may be combined: {\cf \#@@} means 6 digits).
+An optional {\cf --framepadding} can also be used to override the number
+of padding digits.
 For example,
 \begin{code}
     oiiotool --framepadding 3 --frames 3,4,10-20x2 blah.#.tif
@@ -197,6 +195,17 @@ unsigned pixels:
     oiiotool in.tif -d uint8 -o out.tif
 \end{code}
 
+\NEW
+For formats that support per-channel data formats, you can override
+the format for one particular channel using {\cf -d CHNAME=TYPE}.
+For example, assuming {\cf rgbaz.exr} is a {\cf float} RGBAZ file,
+and we wish to convert it to be {\cf half} for RGBA, and {\cf float}
+for Z.  That can be accomplished with the following command:
+
+\begin{code}
+    oiiotool rgbaz.tif -d half -d Z=float -o rgbaz2.exr
+\end{code}
+
 
 \subsection*{Changing the compression}
 
@@ -243,7 +252,7 @@ Convert a scanline file to a tiled file with $16 \times 16$ tiles:
 
 \subsection*{Scale the values in an image}
 
-Reduce the brightness of the R, G, and B channels by 10%%,
+Reduce the brightness of the R, G, and B channels by 10\%,
 but leave the A channel at its original value:
 
 \begin{code}
@@ -408,6 +417,73 @@ many pixels differed, the maximum amount, etc.).  This command does not
 alter the image stack.
 \apiend
 
+\apiitem{--colorcount \emph{r1,g1,b1,...:r2,g2,b2,...:...}}
+\NEW
+Given a list of colors separated by colons or semicolons, where each
+color is a list of comma-separated values (for each channel), examine
+all pixels of the current image and print a short report of how many
+pixels matched each of the colors.
+
+\noindent Optional appended arguments include:
+
+\begin{tabular}{p{10pt} p{0.75in} p{3.75in}}
+  & {\cf eps=}\emph{r,g,b,...} & Tolerance for matching colors (default:
+  0.001 for all channels).
+\end{tabular}
+
+\noindent Examples:
+
+\begin{code}
+    oiiotool test.tif --colorcount "0.792,0,0,1;0.722,0,0,1"
+\end{code}
+\noindent might produce the following output:
+\begin{code}
+   10290  0.792,0,0,1
+   11281  0.722,0,0,1
+\end{code}
+
+\noindent Notice that use of double quotes (\qkw{ }) around the list of
+color arguments, in order to make sure that the command shell does not
+interpret the semicolon ({\cf ;}) as a statement separator.  An
+alternate way to specify multiple colors is to separate them with a
+colon ({\cf :}), for example:
+\begin{code}
+    oiiotool test.tif --colorcount 0.792,0,0,1:0.722,0,0,1
+\end{code}
+
+\noindent Another example:
+
+\begin{code}
+    oiiotool test.tif --colorcount:eps=.01,.01,.01,1000 "0.792,0,0,1"
+\end{code}
+
+\noindent This example sets a larger epsilon for the R, G, and B 
+channels (so that, for example, a pixel with value [0.795,0,0] would
+also match), and by setting the epsilon to 1000 for the alpha channel,
+it effectively ensures that alpha will not be considered in the matching
+of pixels to the color value.
+\apiend
+
+\apiitem{--rangecheck \emph{Rlow,Glow,Blow,...}  \emph{Rhi,Bhi,Ghi,...}}
+\NEW
+Given a two colors (each a comma-separated list of values for each
+channel), print a count of the number of pixels in the image that has
+channel values outside the [low,hi] range.  Any channels not
+specified will assume a low of 0.0 and high of 1.0.
+
+\noindent Example:
+
+\begin{code}
+    oiiotool test.exr --rangecheck 0,0,0 1,1,1
+\end{code}
+\noindent might produce the following output:
+\begin{code}
+     0  < 0,0,0
+   221  > 1,1,1
+ 65315  within range
+\end{code}
+\apiend
+
 \apiitem{--no-clobber}
 Sets ``no clobber'' mode, in which existing images on disk will never be 
 overridden, even if the {\cf -o} command specifies that file.
@@ -479,12 +555,17 @@ Outputs the current image to the named file.  This does not remove the
 current image, it merely saves a copy of it.
 \apiend
 
-\apiitem{-d {\rm \emph{datatype}}}
+\apiitem{-d {\rm \emph{datatype}} \\
+-d {\rm \emph{channelname}{\cf =}\emph{datatype}}}
 
-Attempts to set the pixel data type of all subsequent outputs.  Valid
-choices are: {\cf uint8}, {\cf sint8}, 
+Attempts to set the pixel data type of all subsequent outputs.  If no
+channel is named, sets \emph{all} channels to be the specified data
+type.  If a specific channel is named, then the data type will be
+overridden for just that channel (multiple {\cf -d} commands may be
+used).
+
+Valid types are: {\cf uint8}, {\cf sint8}, 
 {\cf uint16}, {\cf sint16}, {\cf  half}, {\cf float}, {\cf double}.
-
 The types {\cf uint10} and {\cf uint12} may be used to request 10- or
 12-bit unsigned integers.  If the output file format does not support
 them, {\cf uint16} will be substituted.
@@ -568,6 +649,16 @@ black as necessary when written to formats that don't support the
 concepts of pixel data windows and full/display windows.  This is a
 non-issue for file formats that support these concepts, such as OpenEXR.
 \apiend
+
+\apiitem{--autotrim}
+\NEW % 1.2
+For subsequent outputs, if the output format supports separate pixel
+data and full/display windows, automatically trim the output so that
+it writes the minimal data window that contains all the non-zero valued
+pixels.  In other words, trim off any all-black border rows and columns
+before writing the file.
+\apiend
+
 
 \section{\oiiotool commands that change the current image metadata}
 
@@ -716,27 +807,8 @@ on the stack being identical copies.
 \apiend
 
 \apiitem{--swap}
-\NEW
+\NEW % 1.2
 Swap the current image and the next one on the stack.
-\apiend
-
-\apiitem{--ch {\rm \emph{channellist}}}
-Replaces the top image with a new copy whose channels have been 
-reordered as given by the \emph{channellist}.  The {\cf channellist}
-is a comma-separated list of channel names and/or numbers (e.g., 
-\qkw{R,G,B}, \qkw{A}, \qkw{B,G,R}, \qkw{4,5,6,A}).  Channel numbers outside
-the valid range of input channels, or unknown names, will be replaced
-by black channels.
-\NEW A channel designation beginning with the {\cf =} character and followed
-by a number is a \emph{literal value} that will be used to fill that
-channel.  If the \emph{channellist} is shorter than the number of
-channels in the source image, unspecified channels will be omitted.
-\apiend
-
-\apiitem{--chappend}
-\NEW
-Replaces the top two images on the stack with a new image comprised of
-the channels of both images appended together.
 \apiend
 
 \apiitem{--selectmip {\rm \emph{level}}}
@@ -758,6 +830,30 @@ If the current image has multiple subimages, replace the current image
 with a new image consisting of only the given subimage.
 \apiend
 
+\apiitem{--siappend {\rm \emph{n}}}
+\NEW   % 1.3
+Replaces the two two images on the stack with a new image comprised of the
+subimages of both images appended together.
+\apiend
+
+\apiitem{--ch {\rm \emph{channellist}}}
+Replaces the top image with a new copy whose channels have been 
+reordered as given by the \emph{channellist}.  The {\cf channellist}
+is a comma-separated list of channel names and/or numbers (e.g., 
+\qkw{R,G,B}, \qkw{A}, \qkw{B,G,R}, \qkw{4,5,6,A}).  Channel numbers outside
+the valid range of input channels, or unknown names, will be replaced
+by black channels.
+\NEW A channel designation beginning with the {\cf =} character and followed
+by a number is a \emph{literal value} that will be used to fill that
+channel.  If the \emph{channellist} is shorter than the number of
+channels in the source image, unspecified channels will be omitted.
+\apiend
+
+\apiitem{--chappend}
+\NEW  % 1.2
+Replaces the top two images on the stack with a new image comprised of
+the channels of both images appended together.
+\apiend
 
 
 \section{\oiiotool commands that make entirely new images}
@@ -807,7 +903,7 @@ The patterns recognized include the following:
 
 \apiitem{--pattern constant:color=0.3,0.5,0.1,1.0 640x480 4}
 \vspace{10pt}
-A constant 4-channel, $640\times 580$ image with all pixels (0.5, 0.5,
+A constant 4-channel, $640\times 480$ image with all pixels (0.5, 0.5,
 0.1, 1).
 \apiend
 
@@ -998,11 +1094,13 @@ flopped, which is the same as a 180 degree rotation.
 \apiend
 
 \apiitem{--transpose}
+\NEW
 Replace the current image with a new image that is trasposed about
 the $xy$ axis (x and coordinates and size are flipped).
 \apiend
 
-\apiitem{--cshift {\rm \emph{offset}}}}
+\apiitem{--cshift {\rm \emph{offset}}}
+\NEW
 Circularly shift the pixels of the image by the given offset (expressed
 as {\cf +10+100} to move by 10 pixels horizontally and 100 pixels
 vertically, or {\cf +50-30} to move by 50 pixels horizontally and
@@ -1309,17 +1407,65 @@ image, it only changes \oiiotool's understanding of what color
 space those those pixels are in.
 \apiend
 
-\apiitem{--tocolorspace {\rm \emph{tospace}}}
-Replace the current image with a new image whose pixels are transformed
-from their existing color space (as best understood or guessed by OIIO)
-into the named \emph{tospace}.
-\apiend
-
 \apiitem{--colorconvert {\rm \emph{fromspace tospace}}}
 Replace the current image with a new image whose pixels are transformed
 from the named \emph{fromspace} color space into the named
 \emph{tospace} (disregarding any notion it may have previously had 
-about the color space of the current image).
+about the color space of the current image).  
+
+If OIIO has been compiled with OpenColorIO support and the environment
+variable {\cf \$OCIO} is set to point to a valid OpenColorIO
+configuration file, you will have access to all the color spaces that
+are known by that OCIO configuration.  If {\cf \$OCIO} does not point to
+a valid configuration file or OIIO was not compiled with OCIO support,
+then the only color space transformats available are {\cf linear} to
+{\cf Rec709} (and vice versa) and {\cf linear} to {\cf sRGB} (and vice
+versa).
+
+If you ask for \oiiotool help ({\cf oiiotool --help}), at the very
+bottom you will see the list of all color spaces that \oiiotool knows
+about.
+\apiend
+
+\apiitem{--tocolorspace {\rm \emph{tospace}}}
+Replace the current image with a new image whose pixels are transformed
+from their existing color space (as best understood or guessed by OIIO)
+into the named \emph{tospace}.  This is equivalent to a use of
+{\cf oiiotool --colorconvert} where the \emph{fromspace} is
+automatically deduced.
+\apiend
+
+\apiitem{--ociolook {\rm \emph{lookname}}}
+\NEW
+Replace the current image with a new image whose pixels are transformed
+using the named OpenColorIO look description.  Optional appended
+arguments include:
+
+\begin{tabular}{p{10pt} p{1in} p{3.75in}}
+ & {\cf from=}\emph{val} & Assume the image is in the named color
+  space. If no {\cf from=} is supplied, it will try to deduce it
+  from the image's metadata or previous {\cf --iscolorspace}
+  directives. \\
+ & {\cf to=}\emph{val} & Convert to the named space after applying
+  the look. \\
+ & {\cf inverse=}\emph{val} & If \emph{val} is nonzero, inverts the 
+  color transformation and look application. \\
+ & {\cf key=}\emph{name} & \\
+ & {\cf value=}\emph{str} & Adds a key/value pair to the ``context'' that
+  OpenColorIO will used when applying the look. \\
+\end{tabular}
+
+This command is only meaningful if OIIO was compiled with OCIO support
+and the environment variable {\cf \$OCIO} is set to point to a valid
+OpenColorIO configuration file.  If you ask for \oiiotool help 
+({\cf oiiotool --help}), at the very bottom you will see the list of all
+looks that \oiiotool knows about.
+
+\noindent Examples:
+\begin{tinycode}
+  oiiotool in.jpg --ociolook:from=vd8:to=vd8:key=SHOT:value=pe0012 match -o cc.jpg
+\end{tinycode}
+
 \apiend
 
 \apiitem{--unpremult}

@@ -53,6 +53,11 @@
 #include "thread.h"
 
 #ifdef USE_OPENSSL
+#ifdef __APPLE__
+// Newer OSX releaes mark OpenSSL functions as deprecated, in favor of
+// CDSA.  Make the warnings stop.
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations" 
+#endif
 #include <openssl/sha.h>
 #endif
 
@@ -467,6 +472,198 @@ ImageBufAlgo::isMonochrome (const ImageBuf &src, ROI roi, int nthreads)
     // ImageBufAlgo and for future expansion. But for right now, we
     // don't actually split by threads.  Maybe later.
 };
+
+
+
+template<typename T>
+static bool
+color_count_ (const ImageBuf &src, atomic_ll *count,
+              int ncolors, const float *color, const float *eps,
+              ROI roi, int nthreads)
+{
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Lots of pixels and request for multi threads? Parallelize.
+        ImageBufAlgo::parallel_image (
+            boost::bind(color_count_<T>, boost::ref(src),
+                        count, ncolors, color, eps,
+                        _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
+    }
+
+    // Serial case
+    int nchannels = src.nchannels();
+    long long *n = ALLOCA (long long, ncolors);
+    for (int col = 0;  col < ncolors;  ++col)
+        n[col] = 0;
+    for (ImageBuf::ConstIterator<T> p (src, roi);  !p.done();  ++p) {
+        int coloffset = 0;
+        for (int col = 0;  col < ncolors;  ++col, coloffset += nchannels) {
+            int match = 1;
+            for (int c = roi.chbegin;  c < roi.chend;  ++c) {
+                if (fabsf(p[c] - color[coloffset+c]) > eps[c]) {
+                    match = 0;
+                    break;
+                }
+            }
+            n[col] += match;
+        }
+    }
+
+    for (int col = 0;  col < ncolors;  ++col)
+        count[col] += n[col];
+    return true;
+}
+
+
+
+bool
+ImageBufAlgo::color_count (const ImageBuf &src, imagesize_t *count,
+                           int ncolors, const float *color,
+                           const float *eps,
+                           ROI roi, int nthreads)
+{
+    // If no ROI is defined, use the data window of src.
+    if (! roi.defined())
+        roi = get_roi(src.spec());
+    roi.chend = std::min (roi.chend, src.nchannels());
+
+    if (! eps) {
+        float *localeps = ALLOCA (float, roi.chend);
+        for (int c = 0;  c < roi.chend;  ++c)
+            localeps[c] = 0.001f;
+        eps = localeps;
+    }
+
+    for (int col = 0;  col < ncolors;  ++col)
+        count[col] = 0;
+    OIIO_DISPATCH_TYPES ("color_count", color_count_, src.spec().format,
+                         src, (atomic_ll *)count, ncolors, color, eps,
+                         roi, nthreads);
+}
+
+
+
+template<typename T>
+static bool
+color_range_check_ (const ImageBuf &src, atomic_ll *lowcount,
+                    atomic_ll *highcount, atomic_ll *inrangecount,
+                    const float *low, const float *high,
+                    ROI roi, int nthreads)
+{
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Lots of pixels and request for multi threads? Parallelize.
+        ImageBufAlgo::parallel_image (
+            boost::bind(color_range_check_<T>, boost::ref(src),
+                        lowcount, highcount, inrangecount, low, high,
+                        _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
+    }
+
+    // Serial case
+    long long lc = 0, hc = 0, inrange = 0;
+    for (ImageBuf::ConstIterator<T> p (src, roi);  !p.done();  ++p) {
+        bool lowval = false, highval = false;
+        for (int c = roi.chbegin;  c < roi.chend;  ++c) {
+            float f = p[c];
+            lowval |= (f < low[c]);
+            highval |= (f > high[c]);
+        }
+        if (lowval)
+            ++lc;
+        if (highval)
+            ++hc;
+        if (!lowval && !highval)
+            ++inrange;
+    }
+
+    if (lowcount)
+        *lowcount += lc;
+    if (highcount)
+        *highcount += hc;
+    if (inrangecount)
+        *inrangecount += inrange;
+    return true;
+}
+
+
+
+bool
+ImageBufAlgo::color_range_check (const ImageBuf &src, imagesize_t *lowcount,
+                                 imagesize_t *highcount,
+                                 imagesize_t *inrangecount,
+                                 const float *low, const float *high,
+                                 ROI roi, int nthreads)
+{
+    // If no ROI is defined, use the data window of src.
+    if (! roi.defined())
+        roi = get_roi(src.spec());
+    roi.chend = std::min (roi.chend, src.nchannels());
+
+    if (lowcount)
+        *lowcount = 0;
+    if (highcount)
+        *highcount = 0;
+    if (inrangecount)
+        *inrangecount = 0;
+    OIIO_DISPATCH_TYPES ("color_range_check", color_range_check_,
+                         src.spec().format,
+                         src, (atomic_ll *)lowcount, 
+                         (atomic_ll *)highcount, (atomic_ll *)inrangecount,
+                         low, high, roi, nthreads);
+}
+
+
+
+ROI
+ImageBufAlgo::nonzero_region (const ImageBuf &src, ROI roi, int nthreads)
+{
+    std::vector<float> zero (src.nchannels(), 0.0f);
+    std::vector<float> color (src.nchannels(), 0.0f);
+    if (! roi.defined())
+        roi = get_roi (src.spec());
+    // Trim bottom
+    for ( ; roi.ybegin < roi.yend; --roi.yend) {
+        ROI test = roi;  test.ybegin = roi.yend-1;
+        if (! isConstantColor (src, &color[0], test, nthreads) || color != zero)
+            break;
+    }
+    // Trim top
+    for ( ; roi.ybegin < roi.yend; ++roi.ybegin) {
+        ROI test = roi;  test.yend = roi.ybegin+1;
+        if (! isConstantColor (src, &color[0], test, nthreads) || color != zero)
+            break;
+    }
+    // Trim right
+    for ( ; roi.xbegin < roi.xend; --roi.xend) {
+        ROI test = roi;  test.xbegin = roi.xend-1;
+        if (! isConstantColor (src, &color[0], test, nthreads) || color != zero)
+            break;
+    }
+    // Trim left
+    for ( ; roi.xbegin < roi.xend; ++roi.xbegin) {
+        ROI test = roi;  test.xend = roi.xbegin+1;
+        if (! isConstantColor (src, &color[0], test, nthreads) || color != zero)
+            break;
+    }
+    if (roi.depth() > 1) {
+        // Trim zbottom
+        for ( ; roi.zbegin < roi.zend; --roi.zend) {
+            ROI test = roi;  test.zbegin = roi.zend-1;
+            if (! isConstantColor (src, &color[0], test, nthreads) || color != zero)
+                break;
+        }
+        // Trim ztop
+        for ( ; roi.zbegin < roi.zend; ++roi.zbegin) {
+            ROI test = roi;  test.zend = roi.zbegin+1;
+            if (! isConstantColor (src, &color[0], test, nthreads) || color != zero)
+                break;
+        }
+    }
+    return roi;
+}
+
 
 
 

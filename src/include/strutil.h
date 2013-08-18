@@ -46,7 +46,6 @@
 #include <cstdlib>
 #include <vector>
 #include <map>
-#include <sys/types.h>   // to safely get off_t
 
 #include "export.h"
 #include "version.h"
@@ -110,7 +109,7 @@ std::string OIIO_API vformat (const char *fmt, va_list ap)
 ///  - memformat(15300)         -> "14.9 KB"
 ///  - memformat(15300000)      -> "14.6 MB"
 ///  - memformat(15300000000LL) -> "14.2 GB"
-std::string OIIO_API memformat (off_t bytes, int digits=1);
+std::string OIIO_API memformat (long long bytes, int digits=1);
 
 /// Return a string expressing an elapsed time, in human readable form.
 /// e.g. "0:35.2"
@@ -187,6 +186,15 @@ bool OIIO_API iends_with (const char *a, const char *b);
 bool OIIO_API iends_with (const std::string &a, const std::string &b);
 bool OIIO_API iends_with (const char *a, const char *b);
 
+/// Does 'a' contain the string 'b' within it?
+bool OIIO_API contains (const std::string &a, const std::string &b);
+bool OIIO_API contains (const char *a, const char *b);
+
+/// Does 'a' contain the string 'b' within it, using a case-insensitive
+/// comparison?
+bool OIIO_API icontains (const std::string &a, const std::string &b);
+bool OIIO_API icontains (const char *a, const char *b);
+
 /// Convert to upper case, faster than std::toupper because we use
 /// a static locale that doesn't require a mutex lock.
 void OIIO_API to_lower (std::string &a);
@@ -225,7 +233,7 @@ template<> inline int from_string<int> (const std::string &s) {
 }
 // Special case for float
 template<> inline float from_string<float> (const std::string &s) {
-    return strtof (s.c_str(), NULL);
+    return (float)strtod (s.c_str(), NULL);
 }
 
 
