@@ -41,6 +41,35 @@ OIIO_NAMESPACE_USING;
 
 
 
+inline int
+test_wrap (wrap_impl wrap, int coord, int origin, int width)
+{
+    wrap (coord, origin, width);
+    return coord;
+}
+
+
+void
+test_wrapmodes ()
+{
+    const int ori = 0;
+    const int w = 4;
+    static int
+        val[] = {-7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -10},
+        cla[] = { 0,  0,  0,  0,  0,  0,  0, 0, 1, 2, 3, 3, 3, 3, 3, 3, 3},
+        per[] = { 1,  2,  3,  0,  1,  2,  3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1},
+        mir[] = { 1,  2,  3,  3,  2,  1,  0, 0, 1, 2, 3, 3, 2, 1, 0, 0, 1};
+
+    for (int i = 0; val[i] > -10; ++i) {
+        OIIO_CHECK_EQUAL (test_wrap (wrap_clamp, val[i], ori, w), cla[i]);
+        OIIO_CHECK_EQUAL (test_wrap (wrap_periodic, val[i], ori, w), per[i]);
+        OIIO_CHECK_EQUAL (test_wrap (wrap_periodic_pow2, val[i], ori, w), per[i]);
+        OIIO_CHECK_EQUAL (test_wrap (wrap_mirror, val[i], ori, w), mir[i]);
+    }
+}
+
+
+
 // Test iterators
 template <class ITERATOR>
 void iterator_read_test ()
@@ -53,7 +82,7 @@ void iterator_read_test ()
         { {0,3,12}, {1,3,13}, {2,3,14}, {3,3,15} }
     };
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec, buf);
+    ImageBuf A (spec, buf);
 
     ITERATOR p (A);
     OIIO_CHECK_EQUAL (p[0], 0.0f);
@@ -103,7 +132,7 @@ void iterator_wrap_test (ImageBuf::WrapMode wrap, std::string wrapname)
         { {0,3,12}, {1,3,13}, {2,3,14}, {3,3,15} }
     };
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec, buf);
+    ImageBuf A (spec, buf);
 
     std::cout << "iterator_wrap_test " << wrapname << ":";
     int i = 0;
@@ -167,17 +196,16 @@ void ImageBuf_test_appbuffer ()
         { 0, 0, 0, 0, 0, 0, 0, 0 }
     };
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec, buf);
+    ImageBuf A (spec, buf);
 
     // Make sure A now points to the buffer
     OIIO_CHECK_EQUAL ((void *)A.pixeladdr (0, 0, 0), (void *)buf);
 
     // write it
-    A.save ("A.tif");
+    A.write ("A.tif");
 
     // Read it back and make sure it matches the original
     ImageBuf B ("A.tif");
-    B.read ();
     for (int y = 0;  y < HEIGHT;  ++y)
         for (int x = 0;  x < WIDTH;  ++x)
             OIIO_CHECK_EQUAL (A.getchannel (x, y, 0, 0),
@@ -205,7 +233,7 @@ void histogram_computation_test ()
 
     // Create input image with three regions with different pixel values.
     ImageSpec spec (INPUT_WIDTH, INPUT_HEIGHT, 1, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec);
+    ImageBuf A (spec);
 
     float value[] = {0.2f};
     ImageBufAlgo::fill (A, value, ROI(0, INPUT_WIDTH, 0, 8));
@@ -237,6 +265,9 @@ void histogram_computation_test ()
 int
 main (int argc, char **argv)
 {
+    test_wrapmodes ();
+
+    // Lots of tests related to ImageBuf::Iterator
     iterator_read_test<ImageBuf::ConstIterator<float> > ();
     iterator_read_test<ImageBuf::Iterator<float> > ();
 

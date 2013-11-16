@@ -33,7 +33,6 @@
 #include <string>
 #include <sstream>
 #include <list>
-#include <memory>
 
 #include <OpenEXR/ImathMatrix.h>
 
@@ -52,11 +51,12 @@
 #include "imagecache.h"
 #include "imagecache_pvt.h"
 #include "texture_pvt.h"
-#include "../field3d.imageio/field3d_pvt.h"
+#include "../field3d.imageio/field3d_backdoor.h"
 
 OIIO_NAMESPACE_ENTER
 {
-    using namespace pvt;
+using namespace pvt;
+using namespace f3dpvt;
 
 namespace {  // anonymous
 
@@ -315,7 +315,7 @@ TextureSystemImpl::accum3d_sample_closest (const Imath::V3f &P, int miplevel,
     TileRef &tile (thread_info->tile);
     if (! tile  ||  ! ok)
         return false;
-    size_t channelsize = texturefile.channelsize();
+    size_t channelsize = texturefile.channelsize(options.subimage);
     int tilepel = (tile_r * spec.tile_height + tile_t) * spec.tile_width + tile_s;
     int offset = spec.nchannels * tilepel + options.firstchannel;
     DASSERT ((size_t)offset < spec.nchannels*spec.tile_pixels());
@@ -378,10 +378,9 @@ TextureSystemImpl::accum3d_sample_bilinear (const Imath::V3f &P, int miplevel,
 //    bool svalid[2], tvalid[2], rvalid[2];  // Valid texels?  false means black border
     union { bool bvalid[6]; unsigned long long ivalid; } valid_storage;
     valid_storage.ivalid = 0;
-    DASSERT (sizeof(valid_storage) >= 6*sizeof(bool));
+    DASSERT (sizeof(valid_storage) == 8);
     const unsigned long long none_valid = 0;
-    const unsigned long long all_valid = 0x010101010101LL;
-    DASSERT (__LITTLE_ENDIAN__ && "this trick won't work with big endian");
+    const unsigned long long all_valid = littleendian() ? 0x010101010101LL : 0x01010101010100LL;
     bool *svalid = valid_storage.bvalid;
     bool *tvalid = valid_storage.bvalid + 2;
     bool *rvalid = valid_storage.bvalid + 4;
@@ -418,8 +417,8 @@ TextureSystemImpl::accum3d_sample_bilinear (const Imath::V3f &P, int miplevel,
     bool t_onetile = (tile_t != tileheightmask) & (ttex[0]+1 == ttex[1]);
     bool r_onetile = (tile_r != tiledepthmask) & (rtex[0]+1 == rtex[1]);
     bool onetile = (s_onetile & t_onetile & r_onetile);
-    size_t channelsize = texturefile.channelsize();
-    size_t pixelsize = texturefile.pixelsize();
+    size_t channelsize = texturefile.channelsize(options.subimage);
+    size_t pixelsize = texturefile.pixelsize(options.subimage);
     if (onetile &&
         valid_storage.ivalid == all_valid) {
         // Shortcut if all the texels we need are on the same tile

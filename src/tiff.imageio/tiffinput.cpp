@@ -741,7 +741,8 @@ TIFFInput::readspec (bool read_meta)
                 // This is the alpha channel, but color is unassociated
                 m_spec.alpha_channel = c;
                 alpha_is_unassociated = true;
-                m_spec.attribute ("oiio:UnassociatedAlpha", 1);
+                if (m_keep_unassociated_alpha)
+                    m_spec.attribute ("oiio:UnassociatedAlpha", 1);
             } else {
                 DASSERT (sampleinfo[i] == EXTRASAMPLE_UNSPECIFIED);
                 // This extra channel is not alpha at all.  Undo any
@@ -768,7 +769,7 @@ TIFFInput::readspec (bool read_meta)
     // Search for an EXIF IFD in the TIFF file, and if found, rummage 
     // around for Exif fields.
 #if TIFFLIB_VERSION > 20050912    /* compat with old TIFF libs - skip Exif */
-    int exifoffset = 0;
+    toff_t exifoffset = 0;
     if (TIFFGetField (m_tif, TIFFTAG_EXIFIFD, &exifoffset) &&
             TIFFReadEXIFDirectory (m_tif, exifoffset)) {
         for (int i = 0;  exif_tag_table[i].name;  ++i)

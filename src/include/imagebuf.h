@@ -67,7 +67,9 @@ struct ROI {
 
     /// Default constructor is an undefined region.
     ///
-    ROI () : xbegin(std::numeric_limits<int>::min()) { }
+    ROI () : xbegin(std::numeric_limits<int>::min()), xend(0),
+             ybegin(0), yend(0), zbegin(0), zend(0), chbegin(0), chend(0)
+    { }
 
     /// Constructor with an explicitly defined region.
     ///
@@ -164,16 +166,42 @@ class ImageBufImpl;   // Opaque pointer
 /// (translating to/from float automatically).
 class OIIO_API ImageBuf {
 public:
-    /// Construct an ImageBuf to read the named image.  
-    /// If name is the empty string (the default), it's a completely
-    /// uninitialized ImageBuf.
-    ImageBuf (const std::string &name = std::string(),
+    /// Construct an empty/uninitialized ImageBuf.  This is relatively
+    /// useless until you call reset().
+    ImageBuf ();
+
+    /// Construct an ImageBuf to read the named image (at the designated
+    /// subimage/MIPlevel -- but don't actually read it yet!   The image
+    /// will actually be read when other methods need to access the spec
+    /// and/or pixels, or when an explicit call to init_spec() or read() is
+    /// made, whichever comes first. If a non-NULL imagecache is supplied,
+    /// it will specifiy a custom ImageCache to use; if otherwise, the
+    /// global/shared ImageCache will be used.
+    ImageBuf (const std::string &name, int subimage=0, int miplevel=0,
               ImageCache *imagecache = NULL);
+
+    /// Construct an ImageBuf to read the named image -- but don't actually
+    /// read it yet!  The image will actually be read when other methods
+    /// need to access the spec and/or pixels, or when an explicit call to
+    /// init_spec() or read() is made, whichever comes first. If a non-NULL
+    /// imagecache is supplied, it will specifiy a custom ImageCache to use;
+    /// if otherwise, the global/shared ImageCache will be used.
+    ImageBuf (const std::string &name, ImageCache *imagecache);
+
+    /// Construct an Imagebuf given a proposed spec describing the image
+    /// size and type, and allocate storage for the pixels of the image
+    /// (whose values will be uninitialized).
+    ImageBuf (const ImageSpec &spec);
 
     /// Construct an Imagebuf given both a name and a proposed spec
     /// describing the image size and type, and allocate storage for
     /// the pixels of the image (whose values will be undefined).
     ImageBuf (const std::string &name, const ImageSpec &spec);
+
+    /// Construct an ImageBuf that "wraps" a memory buffer owned by the
+    /// calling application.  It can write pixels to this buffer, but
+    /// can't change its resolution or data type.
+    ImageBuf (const ImageSpec &spec, void *buffer);
 
     /// Construct an ImageBuf that "wraps" a memory buffer owned by the
     /// calling application.  It can write pixels to this buffer, but
@@ -188,13 +216,29 @@ public:
     ///
     ~ImageBuf ();
 
+    /// Description of where the pixels live for this ImageBuf.
+    enum IBStorage { UNINITIALIZED,   // no pixel memory
+                     LOCALBUFFER,     // The IB owns the memory
+                     APPBUFFER,       // The IB wraps app's memory
+                     IMAGECACHE       // Backed by ImageCache
+                   };
+
     /// Restore the ImageBuf to an uninitialized state.
     ///
     void clear ();
 
     /// Forget all previous info, reset this ImageBuf to a new image
     /// that is uninitialized (no pixel values, no size or spec).
-    void reset (const std::string &name, ImageCache *imagecache = NULL);
+    void reset (const std::string &name, int subimage, int miplevel,
+                ImageCache *imagecache = NULL);
+
+    /// Forget all previous info, reset this ImageBuf to a new image
+    /// that is uninitialized (no pixel values, no size or spec).
+    void reset (const std::string &name, ImageCache *imagecache=NULL);
+
+    /// Forget all previous info, reset this ImageBuf to a blank
+    /// image of the given dimensions.
+    void reset (const ImageSpec &spec);
 
     /// Forget all previous info, reset this ImageBuf to a blank
     /// image of the given name and dimensions.
@@ -205,7 +249,15 @@ public:
     /// already has allocated pixels, their values will not be preserved
     /// if the new spec does not describe an image of the same size and
     /// data type as it used to be.
+    /// DEPRECATED (1.3) -- I don't see any reason why this should be
+    /// favored over reset(spec).
     void alloc (const ImageSpec &spec);
+
+    /// Which type of storage is being used for the pixels?
+    IBStorage storage () const;
+
+    /// Is this ImageBuf object initialized?
+    bool initialized () const;
 
     /// Read the file from disk.  Generally will skip the read if we've
     /// already got a current version of the image in memory, unless
@@ -224,11 +276,24 @@ public:
     bool init_spec (const std::string &filename,
                     int subimage, int miplevel);
 
-    /// Save the image or a subset thereof, with override for filename
-    /// ("" means use the original filename) and file format ("" indicates
-    /// to infer it from the filename).  This uses ImageOutput
-    /// underneath, so will write any file format for which an
-    /// appropriate imageio plugin can be found.
+    /// Write the image to the named file and file format ("" means to infer
+    /// the type from the filename extension). Return true if all went ok,
+    /// false if there were errors writing.
+    bool write (const std::string &filename,
+                const std::string &fileformat = std::string(),
+                ProgressCallback progress_callback=NULL,
+                void *progress_callback_data=NULL) const;
+
+    /// Inform the ImageBuf what data format you'd like for any subsequent
+    /// write().
+    void set_write_format (TypeDesc format);
+
+    /// Inform the ImageBuf what tile size (or no tiling, for 0) for
+    /// any subsequent write().
+    void set_write_tiles (int width=0, int height=0, int depth=0);
+
+    /// DEPRECATED (1.3) synonym for write().  Kept for now for backward
+    /// compatibility.
     bool save (const std::string &filename = std::string(),
                const std::string &fileformat = std::string(),
                ProgressCallback progress_callback=NULL,
@@ -269,6 +334,9 @@ public:
     /// converted automatically to the data type of the app buffer.
     bool copy (const ImageBuf &src);
 
+    /// Swap with another ImageBuf
+    void swap (ImageBuf &other) { std::swap (m_impl, other.m_impl); }
+
     /// Error reporting for ImageBuf: call this with printf-like
     /// arguments.  Note however that this is fully typesafe!
     /// void error (const char *format, ...)
@@ -279,9 +347,9 @@ public:
     /// to retrieve via geterror().
     bool has_error (void) const;
 
-    /// Return info on the last error that occurred since geterror() was
-    /// called (or an empty string if no errors are pending).  This also
-    /// clears the error message for next time.
+    /// Return the text of all error messages issued since geterror()
+    /// was called (or an empty string if no errors are pending).  This
+    /// also clears the error message for next time.
     std::string geterror (void) const;
 
     /// Return a read-only (const) reference to the image spec that
@@ -358,31 +426,31 @@ public:
     void interppixel (float x, float y, float *pixel,
                       WrapMode wrap=WrapBlack) const;
 
-    /// Linearly interpolate at image data NDC coordinates (x,y), where (0,0) is
-    /// the upper left corner of the pixel data window, (1,1) the lower
-    /// right corner of the pixel data.
+    /// Linearly interpolate at image data NDC coordinates (s,t), where
+    /// (0,0) is the upper left corner of the pixel data window, (1,1)
+    /// the lower right corner of the pixel data.
     /// FIXME -- lg thinks that this is stupid, and the only useful NDC
     /// space is the one used by interppixel_NDC_full.  We should deprecate
     /// this in the future.
-    void interppixel_NDC (float x, float y, float *pixel,
+    void interppixel_NDC (float s, float t, float *pixel,
                           WrapMode wrap=WrapBlack) const;
 
-    /// Linearly interpolate at NDC (image) coordinates (x,y), where (0,0) is
+    /// Linearly interpolate at space coordinates (s,t), where (0,0) is
     /// the upper left corner of the display window, (1,1) the lower
     /// right corner of the display window.
-    void interppixel_NDC_full (float x, float y, float *pixel,
+    void interppixel_NDC_full (float s, float t, float *pixel,
                                WrapMode wrap=WrapBlack) const;
 
-    /// Set the pixel value by x and y coordintes (on [0,res-1]),
-    /// from floating-point values in pixel[].  Set at most
-    /// maxchannels (will be clamped to the actual number of channels).
+    /// Set the pixel with coordinates (x,y,0) to have the values in
+    /// pixel[0..n-1].  The number of channels copied, n, is the minimum
+    /// of maxchannels and the actual number of channels in the image.
     void setpixel (int x, int y, const float *pixel, int maxchannels=1000) {
         setpixel (x, y, 0, pixel, maxchannels);
     }
 
-    /// Set the pixel value by x, y, z coordintes (on [0,res-1]),
-    /// from floating-point values in pixel[].  Set at most
-    /// maxchannels (will be clamped to the actual number of channels).
+    /// Set the pixel with coordinates (x,y,z) to have the values in
+    /// pixel[0..n-1].  The number of channels copied, n, is the minimum
+    /// of maxchannels and the actual number of channels in the image.
     void setpixel (int x, int y, int z,
                    const float *pixel, int maxchannels=1000);
 
@@ -392,15 +460,16 @@ public:
     void setpixel (int i, const float *pixel, int maxchannels=1000);
 
     /// Retrieve the rectangle of pixels spanning [xbegin..xend) X
-    /// [ybegin..yend), channels [chbegin,chend) (all with exclusive
-    /// 'end'), specified as integer pixel coordinates, at the current
-    /// MIP-map level, storing the pixel values beginning at the address
-    /// specified by result and with the given strides (by default,
-    /// AutoStride means the usual contiguous packing of pixels).  It is
-    /// up to the caller to ensure that result points to an area of
-    /// memory big enough to accommodate the requested rectangle.
-    /// Return true if the operation could be completed, otherwise
-    /// return false.
+    /// [ybegin..yend) X [zbegin..zend), channels [chbegin,chend) (all
+    /// with exclusive 'end'), specified as integer pixel coordinates,
+    /// at the current subimage and MIP-map level, storing the pixel
+    /// values beginning at the address specified by result and with the
+    /// given strides (by default, AutoStride means the usual contiguous
+    /// packing of pixels) and converting into the data type described
+    /// by 'format'.  It is up to the caller to ensure that result
+    /// points to an area of memory big enough to accommodate the
+    /// requested rectangle.  Return true if the operation could be
+    /// completed, otherwise return false.
     bool get_pixel_channels (int xbegin, int xend, int ybegin, int yend,
                              int zbegin, int zend, int chbegin, int chend,
                              TypeDesc format, void *result,
@@ -409,17 +478,19 @@ public:
                              stride_t zstride=AutoStride) const;
 
     /// Retrieve the rectangle of pixels spanning [xbegin..xend) X
-    /// [ybegin..yend) (with exclusive 'end'), specified as integer
-    /// pixel coordinates, at the current MIP-map level, storing the
-    /// pixel values beginning at the address specified by result and
-    /// with the given strides (by default, AutoStride means the usual
-    /// contiguous packing of pixels).  It is up to the caller to ensure
-    /// that result points to an area of memory big enough to
-    /// accommodate the requested rectangle.  Return true if the
-    /// operation could be completed, otherwise return false.
+    /// [ybegin..yend) X [zbegin..zend) (with exclusive 'end'),
+    /// specified as integer pixel coordinates, at the current MIP-map
+    /// level, storing the pixel values beginning at the address
+    /// specified by result and with the given strides (by default,
+    /// AutoStride means the usual contiguous packing of pixels) and
+    /// converting into the data type described by 'format'.  It is up
+    /// to the caller to ensure that result points to an area of memory
+    /// big enough to accommodate the requested rectangle.  Return true
+    /// if the operation could be completed, otherwise return false.
     bool get_pixels (int xbegin, int xend, int ybegin, int yend,
-                     int zbegin, int zend, TypeDesc format,
-                     void *result, stride_t xstride=AutoStride,
+                     int zbegin, int zend,
+                     TypeDesc format, void *result,
+                     stride_t xstride=AutoStride,
                      stride_t ystride=AutoStride,
                      stride_t zstride=AutoStride) const;
 
@@ -466,22 +537,6 @@ public:
         return get_pixels (xbegin_, xend_, ybegin_, yend_, zbegin_, zend_,
                            &result[0]);
     }
-
-    /// Retrieve the number of deep data samples corresponding to pixel
-    /// (x,y,z).  Return 0 not a deep image or if the pixel is out of
-    /// range or has no deep samples.
-    int deep_samples (int x, int y, int z=0) const;
-
-    /// Return a pointer to the raw array of deep data samples for
-    /// channel c of pixel (x,y,z).  Return NULL if not a deep image or
-    /// if the pixel is out of range or has no deep samples.
-    const void *deep_pixel_ptr (int x, int y, int z, int c) const;
-
-    /// Return the value (as a float) of sample s of channel c of pixel
-    /// (x,y,z).  Return 0.0 if not a deep image or if the pixel
-    /// coordinates or channel number are out of range or if it has no
-    /// deep samples.
-    float deep_value (int x, int y, int z, int c, int s) const;
 
     int orientation () const;
 
@@ -531,18 +586,35 @@ public:
     int zmax () const;
 
     /// Set the "full" (a.k.a. display) window to [xbegin,xend) x
+    /// [ybegin,yend) x [zbegin,zend).
+    void set_full (int xbegin, int xend, int ybegin, int yend,
+                   int zbegin, int zend);
+
+    /// Set the "full" (a.k.a. display) window to [xbegin,xend) x
     /// [ybegin,yend) x [zbegin,zend).  If bordercolor is not NULL, also
     /// set the spec's "oiio:bordercolor" attribute.
+    /// DEPRECATED (1.3) -- we don't use the 'bordercolor' parameter, and
+    /// it seems strange, so let's phase it out.
     void set_full (int xbegin, int xend, int ybegin, int yend,
-                   int zbegin, int zend, const float *bordercolor=NULL);
+                   int zbegin, int zend, const float *bordercolor);
+
+    /// Return pixel data window for this ImageBuf as a ROI.
+    ROI roi () const;
+
+    /// Return full/display window for this ImageBuf as a ROI.
+    ROI roi_full () const;
+
+    /// Set full/display window for this ImageBuf to a ROI.
+    /// Does NOT change the channels of the spec, regardless of newroi.
+    void set_roi_full (const ROI &newroi);
 
     bool pixels_valid (void) const;
 
     TypeDesc pixeltype () const;
 
-    /// A pointer to "local" pixels, if they are fully in RAM and not
-    /// backed by an ImageCache, or NULL otherwise.  (You can also test
-    /// it like a bool to find out if pixels are local.)
+    /// A raw pointer to "local" pixel memory, if they are fully in RAM
+    /// and not backed by an ImageCache, or NULL otherwise.  You can
+    /// also test it like a bool to find out if pixels are local.
     void *localpixels ();
     const void *localpixels () const;
 
@@ -552,15 +624,10 @@ public:
 
     ImageCache *imagecache () const;
 
-    /// Return the address where pixel (x,y) is stored in the image buffer.
-    /// Use with extreme caution!  Will return NULL if the pixel values
-    /// aren't local.
-    const void *pixeladdr (int x, int y) const { return pixeladdr (x, y, 0); }
-
     /// Return the address where pixel (x,y,z) is stored in the image buffer.
     /// Use with extreme caution!  Will return NULL if the pixel values
     /// aren't local.
-    const void *pixeladdr (int x, int y, int z) const;
+    const void *pixeladdr (int x, int y, int z=0) const;
 
     /// Return the address where pixel (x,y) is stored in the image buffer.
     /// Use with extreme caution!  Will return NULL if the pixel values
@@ -575,12 +642,26 @@ public:
     /// Does this ImageBuf store deep data?
     bool deep () const;
 
+    /// Retrieve the number of deep data samples corresponding to pixel
+    /// (x,y,z).  Return 0 if not a deep image or if the pixel is out of
+    /// range or has no deep samples.
+    int deep_samples (int x, int y, int z=0) const;
+
+    /// Return a pointer to the raw array of deep data samples for
+    /// channel c of pixel (x,y,z).  Return NULL if the pixel
+    /// coordinates or channel number are out of range, if the
+    /// pixel/channel has no deep samples, or if the image is not deep.
+    const void *deep_pixel_ptr (int x, int y, int z, int c) const;
+
+    /// Return the value (as a float) of sample s of channel c of pixel
+    /// (x,y,z).  Return 0.0 if not a deep image or if the pixel
+    /// coordinates or channel number are out of range or if it has no
+    /// deep samples.
+    float deep_value (int x, int y, int z, int c, int s) const;
+
     /// Retrieve the "deep" data.
     DeepData *deepdata ();
     const DeepData *deepdata () const;
-
-    /// Is this ImageBuf object initialized?
-    bool initialized () const;
 
     friend class IteratorBase;
 
@@ -725,20 +806,22 @@ public:
             bool v = valid(x_,y_,z_);
             bool e = exists(x_,y_,z_);
             if (m_localpixels) {
-                if (! e) {
+                if (e)
+                    m_proxydata = (char *)m_ib->pixeladdr (x_, y_, z_);
+                else {  // pixel not in data window
                     m_x = x_;  m_y = y_;  m_z = z_;
                     if (m_wrap == WrapBlack) {
                         m_proxydata = (char *)m_ib->blackpixel();
                     } else {
-                        m_ib->do_wrap (x_, y_, z_, m_wrap);
-                        m_proxydata = (char *)m_ib->pixeladdr (x_, y_, z_);
+                        if (m_ib->do_wrap (x_, y_, z_, m_wrap))
+                            m_proxydata = (char *)m_ib->pixeladdr (x_, y_, z_);
+                        else
+                            m_proxydata = (char *)m_ib->blackpixel();
                     }
                     m_valid = v;
                     m_exists = e;
                     return;
                 }
-                else
-                    m_proxydata = (char *)m_ib->pixeladdr (x_, y_, z_);
             }
             else if (! m_deep)
                 m_proxydata = (char *)m_ib->retile (x_, y_, z_, m_tile,
@@ -803,7 +886,8 @@ public:
         ImageCache::Tile *m_tile;
         int m_tilexbegin, m_tileybegin, m_tilezbegin;
         int m_tilexend;
-        int m_nchannels, m_pixel_bytes;
+        int m_nchannels;
+        size_t m_pixel_bytes;
         char *m_proxydata;
         WrapMode m_wrap;
 
@@ -812,7 +896,7 @@ public:
         void init_ib (WrapMode wrap) {
             const ImageSpec &spec (m_ib->spec());
             m_deep = spec.deep;
-            m_localpixels = m_ib->localpixels();
+            m_localpixels = (m_ib->localpixels() != NULL);
             m_img_xbegin = spec.x; m_img_xend = spec.x+spec.width;
             m_img_ybegin = spec.y; m_img_yend = spec.y+spec.height;
             m_img_zbegin = spec.z; m_img_zend = spec.z+spec.depth;
@@ -850,8 +934,10 @@ public:
                         m_proxydata = (char *)m_ib->blackpixel();
                     } else {
                         int x = m_x, y = m_y, z = m_z;
-                        m_ib->do_wrap (x, y, z, m_wrap);
-                        m_proxydata = (char *)m_ib->pixeladdr (x, y, z);
+                        if (m_ib->do_wrap (x, y, z, m_wrap))
+                            m_proxydata = (char *)m_ib->pixeladdr (x, y, z);
+                        else
+                            m_proxydata = (char *)m_ib->blackpixel();
                     }
                 }
             } else if (m_deep) {
@@ -901,11 +987,11 @@ public:
         }
         /// Construct from an ImageBuf and a specific pixel index.
         /// The iteration range is the full image.
-        Iterator (ImageBuf &ib, int x_, int y_, int z_=0,
+        Iterator (ImageBuf &ib, int x, int y, int z=0,
                   WrapMode wrap=WrapDefault)
             : IteratorBase(ib,wrap)
         {
-            pos (x_, y_, z_);
+            pos (x, y, z);
         }
         /// Construct read-write iteration region from ImageBuf and ROI.
         Iterator (ImageBuf &ib, const ROI &roi, WrapMode wrap=WrapDefault)
@@ -1069,7 +1155,11 @@ protected:
 
     const void *blackpixel () const;
 
-    void do_wrap (int &x, int &y, int &z, WrapMode wrap) const;
+    // Given x,y,z known to be outside the pixel data range, and a wrap
+    // mode, alter xyz to implement the wrap. Return true if the resulting
+    // x,y,z is within the valid pixel data window, false if it still is
+    // not.
+    bool do_wrap (int &x, int &y, int &z, WrapMode wrap) const;
 
     /// Private and unimplemented.
     const ImageBuf& operator= (const ImageBuf &src);

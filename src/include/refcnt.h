@@ -43,13 +43,16 @@
 #include "version.h"
 
 #include <memory>
-using std::shared_ptr;
+#include <boost/shared_ptr.hpp>
 #include <boost/intrusive_ptr.hpp>
-using boost::intrusive_ptr;
 
 
 OIIO_NAMESPACE_ENTER
 {
+
+using boost::shared_ptr;
+using boost::intrusive_ptr;
+
 
 /// Mix-in class that adds a reference count, implemented as an atomic
 /// counter.

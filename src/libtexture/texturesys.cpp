@@ -32,8 +32,8 @@
 #include <math.h>
 #include <string>
 #include <sstream>
+#include <cstring>
 #include <list>
-#include <memory>
 
 #include <OpenEXR/ImathMatrix.h>
 
@@ -66,8 +66,6 @@ OIIO_NAMESPACE_ENTER
 
 namespace {  // anonymous
 
-static shared_ptr<TextureSystemImpl> shared_texsys;
-static mutex shared_texsys_mutex;
 static EightBitConverter<float> uchar2float;
 
 }  // end anonymous namespace
@@ -77,21 +75,22 @@ TextureSystem *
 TextureSystem::create (bool shared)
 {
     ImageCache *ic = ImageCache::create (shared);
-#if 0
-    if (shared) {
-        // They requested a shared texsys.  If a shared texsys already
-        // exists, just return it, otherwise record the new cache.
-        lock_guard guard (shared_texsys_mutex);
-        if (! shared_texsys.get())
-            shared_texsys.reset (new TextureSystemImpl (ic));
-#ifndef NDEBUG
-        std::cerr << " shared TextureSystem is "
-                  << (void *)shared_texsys.get() << "\n";
-#endif
-        return shared_texsys.get ();
-    }
-#endif
     return new TextureSystemImpl (ic);
+}
+
+
+
+void
+TextureSystem::destroy (TextureSystem *x, bool teardown_imagecache)
+{
+    if (! x)
+        return;
+    TextureSystemImpl *impl = (TextureSystemImpl *) x;
+    if (teardown_imagecache) {
+        ImageCache::destroy (impl->m_imagecache, true);
+        impl->m_imagecache = NULL;
+    }
+    delete (TextureSystemImpl *) impl;
 }
 
 
@@ -99,10 +98,7 @@ TextureSystem::create (bool shared)
 void
 TextureSystem::destroy (TextureSystem *x)
 {
-    // Delete only if it's a private one
-//    lock_guard guard (shared_texsys_mutex);
-//    if (x != shared_texsys.get())
-        delete (TextureSystemImpl *) x;
+    destroy (x, false);
 }
 
 
@@ -224,8 +220,7 @@ TextureSystemImpl::getstats (int level, bool icstats) const
     bool anytexture = (stats.texture_queries + stats.texture3d_queries +
                        stats.shadow_queries + stats.environment_queries);
     if (level > 0 && anytexture) {
-        out << "OpenImageIO Texture statistics (" << (void*)this
-            << ", cache = " << (void *)m_imagecache << ")\n";
+        out << "OpenImageIO Texture statistics\n";
         out << "  Queries/batches : \n";
         out << "    texture     :  " << stats.texture_queries
             << " queries in " << stats.texture_batches << " batches\n";
@@ -451,8 +446,8 @@ TextureSystemImpl::get_texels (ustring filename, TextureOpt &options,
                 TileRef &tile (thread_info->tile);
                 const char *data;
                 if (tile && (data = (const char *)tile->data (x, y, z))) {
-                    data += options.firstchannel * texfile->datatype().size();
-                    convert_types (texfile->datatype(), data,
+                    data += options.firstchannel * texfile->datatype(subimage).size();
+                    convert_types (texfile->datatype(subimage), data,
                                    format, result, actualchannels);
                     for (int c = actualchannels;  c < options.nchannels;  ++c)
                         convert_types (TypeDesc::FLOAT, &options.fill,
@@ -838,7 +833,7 @@ compute_miplevels (TextureSystemImpl::TextureFile &texturefile,
                    int *miplevel, float *levelweight)
 {
     ImageCacheFile::SubimageInfo &subinfo (texturefile.subimageinfo(options.subimage));
-    float levelblend;
+    float levelblend = 0.0f;
     int nmiplevels = (int)subinfo.levels.size();
     for (int m = 0;  m < nmiplevels;  ++m) {
         // Compute the filter size (minor axis) in raster space at this
@@ -1220,7 +1215,8 @@ TextureSystemImpl::pole_color (TextureFile &texturefile,
     if (! levelinfo.onetile)
         return NULL;   // Only compute color for one-tile MIP levels
     const ImageSpec &spec (levelinfo.spec);
-    size_t pixelsize = texturefile.pixelsize();
+    size_t pixelsize = texturefile.pixelsize(subimage);
+    bool eightbit = texturefile.eightbit(subimage);
     if (! levelinfo.polecolorcomputed) {
         static spin_mutex mutex;   // Protect everybody's polecolor
         spin_lock lock (mutex);
@@ -1238,7 +1234,7 @@ TextureSystemImpl::pole_color (TextureFile &texturefile,
                 const unsigned char *texel = tile->bytedata() + y*spec.tile_width*pixelsize;
                 for (size_t i = 0;  i < width;  ++i, texel += pixelsize)
                     for (int c = 0;  c < spec.nchannels;  ++c)
-                        if (texturefile.eightbit())
+                        if (eightbit)
                             p[c] += uchar2float(texel[c]);
                         else
                             p[c] += ((const float *)texel)[c];
@@ -1330,7 +1326,7 @@ TextureSystemImpl::accum_sample_closest (float s, float t, int miplevel,
     TileRef &tile (thread_info->tile);
     if (! tile  ||  ! ok)
         return false;
-    size_t channelsize = texturefile.channelsize();
+    size_t channelsize = texturefile.channelsize(options.subimage);
     int offset = spec.nchannels * (tile_t * spec.tile_width + tile_s) + options.firstchannel;
     DASSERT ((size_t)offset < spec.nchannels*spec.tile_pixels());
     if (channelsize == 1) {
@@ -1411,8 +1407,8 @@ TextureSystemImpl::accum_sample_bilinear (float s, float t, int miplevel,
     bool s_onetile = (tile_s != tilewidthmask) & (stex[0]+1 == stex[1]);
     bool t_onetile = (tile_t != tileheightmask) & (ttex[0]+1 == ttex[1]);
     bool onetile = (s_onetile & t_onetile);
-    size_t channelsize = texturefile.channelsize();
-    size_t pixelsize = texturefile.pixelsize();
+    size_t channelsize = texturefile.channelsize(options.subimage);
+    size_t pixelsize = texturefile.pixelsize(options.subimage);
     if (onetile &&
 //        (svalid[0] & svalid[1] & tvalid[0] & tvalid[1])) {
         valid_storage.ivalid == all_valid) {
@@ -1640,8 +1636,8 @@ TextureSystemImpl::accum_sample_bicubic (float s, float t, int miplevel,
         }
     }
     bool onetile = (s_onetile & t_onetile);
-    size_t channelsize = texturefile.channelsize();
-    size_t pixelsize = texturefile.pixelsize();
+    size_t channelsize = texturefile.channelsize(options.subimage);
+    size_t pixelsize = texturefile.pixelsize(options.subimage);
     if (onetile & allvalid) {
         // Shortcut if all the texels we need are on the same tile
         TileID id (texturefile, options.subimage, miplevel,
@@ -1725,7 +1721,7 @@ TextureSystemImpl::accum_sample_bicubic (float s, float t, int miplevel,
     float g0y = wy[0] + wy[1]; float h0y = (wy[1] / g0y);
     float g1y = wy[2] + wy[3]; float h1y = (wy[3] / g1y);
 
-    if (texturefile.eightbit()) {
+    if (texturefile.eightbit(options.subimage)) {
         for (int c = 0;  c < nc; ++c) {
             float col[4];
             for (int j = 0;  j < 4; ++j) {
@@ -1890,7 +1886,7 @@ TextureSystemImpl::visualize_ellipse (const std::string &name,
     float scale = 100;
     int w = 256, h = 256;
     ImageSpec spec (w, h, 3);
-    ImageBuf ib (name, spec);
+    ImageBuf ib (spec);
     static float dark[3] = { 0.2, 0.2, 0.2 };
     static float white[3] = { 1, 1, 1 };
     static float grey[3] = { 0.5, 0.5, 0.5 };
@@ -1929,7 +1925,7 @@ TextureSystemImpl::visualize_ellipse (const std::string &name,
                                            yy-size/2, yy+size/2+1));
     }
 
-    ib.save ();
+    ib.write (name);
 }
 
 
