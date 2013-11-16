@@ -222,7 +222,7 @@ atomic_exchange_and_add (volatile int *at, int x)
 #ifdef USE_GCC_ATOMICS
     return __sync_fetch_and_add ((int *)at, x);
 #elif USE_TBB
-    atomic<int> *a = (atomic<int> *)at;
+    tbb::atomic<int> *a = (tbb::atomic<int> *)at;
     return a->fetch_and_add (x);
 #elif defined(_MSC_VER)
     // Windows
@@ -240,7 +240,7 @@ atomic_exchange_and_add (volatile long long *at, long long x)
 #ifdef USE_GCC_ATOMICS
     return __sync_fetch_and_add (at, x);
 #elif USE_TBB
-    atomic<long long> *a = (atomic<long long> *)at;
+    tbb::atomic<long long> *a = (tbb::atomic<long long> *)at;
     return a->fetch_and_add (x);
 #elif defined(_MSC_VER)
     // Windows
@@ -268,7 +268,7 @@ atomic_compare_and_exchange (volatile int *at, int compareval, int newval)
 #ifdef USE_GCC_ATOMICS
     return __sync_bool_compare_and_swap (at, compareval, newval);
 #elif USE_TBB
-    atomic<int> *a = (atomic<int> *)at;
+    tbb::atomic<int> *a = (tbb::atomic<int> *)at;
     return a->compare_and_swap (newval, compareval) == newval;
 #elif defined(_MSC_VER)
     return (_InterlockedCompareExchange ((volatile LONG *)at, newval, compareval) == compareval);
@@ -285,7 +285,7 @@ atomic_compare_and_exchange (volatile long long *at, long long compareval, long 
 #ifdef USE_GCC_ATOMICS
     return __sync_bool_compare_and_swap (at, compareval, newval);
 #elif USE_TBB
-    atomic<long long> *a = (atomic<long long> *)at;
+    tbb::atomic<long long> *a = (tbb::atomic<long long> *)at;
     return a->compare_and_swap (newval, compareval) == newval;
 #elif defined(_MSC_VER)
     return (_InterlockedCompareExchange64 ((volatile LONGLONG *)at, newval, compareval) == compareval);
