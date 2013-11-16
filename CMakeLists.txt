@@ -2,8 +2,8 @@ project (OpenImageIO)
 
 # Release version of the library
 set (OIIO_VERSION_MAJOR 1)
-set (OIIO_VERSION_MINOR 3)
-set (OIIO_VERSION_PATCH 2)
+set (OIIO_VERSION_MINOR 4)
+set (OIIO_VERSION_PATCH 0)
 set (OIIO_VERSION_RELEASE_TYPE "dev")   # "dev", "betaX", "RCY", ""
 
 cmake_minimum_required (VERSION 2.6)
@@ -13,12 +13,12 @@ endif ()
 message (STATUS "Project source dir = ${PROJECT_SOURCE_DIR}")
 message (STATUS "Project build dir = ${CMAKE_BINARY_DIR}")
 
-if (${PROJECT_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
+if ("${PROJECT_SOURCE_DIR}" STREQUAL "${CMAKE_BINARY_DIR}")
     message (FATAL_ERROR "Not allowed to run in-source build!")
 endif ()
 
-if (NOT CMAKE_BUILD_TYPE) 
-    set (CMAKE_BUILD_TYPE "Release") 
+if (NOT CMAKE_BUILD_TYPE)
+    set (CMAKE_BUILD_TYPE "Release")
 endif ()
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set (DEBUGMODE ON)
@@ -42,14 +42,10 @@ if (CMAKE_COMPILER_IS_GNUCC)
                      OUTPUT_STRIP_TRAILING_WHITESPACE)
     message (STATUS "Using gcc ${GCC_VERSION} as the compiler")
 endif ()
-if (NOT CMAKE_COMPILER_IS_CLANG)
-    message (STATUS "CMAKE_CXX_COMPILER is ${CMAKE_CXX_COMPILER}")
-    string (REGEX MATCH clang CMAKE_COMPILER_IS_CLANG ${CMAKE_CXX_COMPILER})
-    message (STATUS "CMAKE_COMPILER_IS_CLANG is '${CMAKE_COMPILER_IS_CLANG}'")
-    if (CMAKE_COMPILER_IS_CLANG)
-        set (CMAKE_COMPILER_IS_CLANG 1)
-        message (STATUS "Using clang as the compiler")
-    endif ()
+message (STATUS "CMAKE_CXX_COMPILER_ID is ${CMAKE_CXX_COMPILER_ID}")
+if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+    set (CMAKE_COMPILER_IS_CLANG 1)
+    message (STATUS "Using clang as the compiler")
 endif ()
 
 ## turn on more detailed warnings and consider warnings as errors
@@ -76,6 +72,20 @@ if (CMAKE_COMPILER_IS_CLANG)
     add_definitions ("-Qunused-arguments")
 endif ()
 
+if (CMAKE_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNUCC)
+    if (HIDE_SYMBOLS AND NOT DEBUGMODE)
+        # Turn default symbol visibility to hidden
+        set (VISIBILITY_COMMAND "-fvisibility=hidden -fvisibility-inlines-hidden")
+        add_definitions (${VISIBILITY_COMMAND})
+        if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+            # Linux: also hide all the symbols of dependent libraries to
+            # prevent clashes if an app using OIIO is linked against
+            # other verions of our dependencies.
+            set (VISIBILITY_MAP_COMMAND "-Wl,--version-script=${PROJECT_SOURCE_DIR}/src/libOpenImageIO/libOpenImageIO.map")
+        endif ()
+    endif ()
+endif ()
+
 
 set (VERBOSE OFF CACHE BOOL "Print lots of messages while compiling")
 set (EMBEDPLUGINS ON CACHE BOOL "Embed format plugins in libOpenImageIO")
@@ -95,6 +105,7 @@ set (USE_OCIO ON CACHE BOOL "Use OpenColorIO for color management if found")
 set (USE_OPENCV ON CACHE BOOL "Use OpenCV if found")
 set (USE_OPENSSL ON CACHE BOOL "Use OpenSSL if found")
 set (USE_FREETYPE ON CACHE BOOL "Use Freetype if found")
+set (USE_GIF ON CACHE BOOL "Use GIF if found")
 set (NOTHREADS OFF CACHE BOOL "Compile with no threads or locking")
 set (PYTHON_VERSION 2.6)
 set (USE_EXTERNAL_PUGIXML OFF CACHE BOOL
@@ -125,27 +136,13 @@ else ()
     message (STATUS "TBB will not be used")
 endif ()
 
-if (CMAKE_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNUCC)
-    if (HIDE_SYMBOLS AND NOT DEBUGMODE)
-        # Turn default symbol visibility to hidden
-        set (VISIBILITY_COMMAND "-fvisibility=hidden -fvisibility-inlines-hidden")
-        add_definitions (${VISIBILITY_COMMAND})
-        if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
-            # Linux: also hide all the symbols of dependent libraries to
-            # prevent clashes if an app using OIIO is linked against
-            # other verions of our dependencies.
-            set (VISIBILITY_MAP_COMMAND "-Wl,--version-script=${PROJECT_SOURCE_DIR}/libOpenImageIO/libOpenImageIO.map")
-        endif ()
-    endif ()
-endif ()
-
 if (EXTRA_CPP_DEFINITIONS)
     add_definitions ("${EXTRA_CPP_DEFINITIONS}")
 endif()
 
 set(CMAKE_MODULE_PATH
-    "${PROJECT_SOURCE_DIR}/cmake/modules"
-    "${PROJECT_SOURCE_DIR}/cmake")
+    "${PROJECT_SOURCE_DIR}/src/cmake/modules"
+    "${PROJECT_SOURCE_DIR}/src/cmake")
 
 # Set the default namespace
 if(NOT OIIO_NAMESPACE)
@@ -164,8 +161,8 @@ include (externalpackages)
 
 
 include_directories(
-    ${CMAKE_SOURCE_DIR}/include/
-    ${CMAKE_BINARY_DIR}/include/
+    "${CMAKE_SOURCE_DIR}/src/include/"
+    "${CMAKE_BINARY_DIR}/include/"
 )
 
 
@@ -258,53 +255,54 @@ include (CTest)
 
 
 # Tell CMake to process the sub-directories
-add_subdirectory (libOpenImageIO)
+add_subdirectory (src/libOpenImageIO)
 
 if (OIIO_BUILD_TOOLS)
-  add_subdirectory (iconvert)
-  add_subdirectory (idiff)
-  add_subdirectory (igrep)
-  add_subdirectory (iinfo)
-  add_subdirectory (maketx)
-  add_subdirectory (oiiotool)
-  add_subdirectory (testtex)
-  add_subdirectory (iv)
+  add_subdirectory (src/iconvert)
+  add_subdirectory (src/idiff)
+  add_subdirectory (src/igrep)
+  add_subdirectory (src/iinfo)
+  add_subdirectory (src/maketx)
+  add_subdirectory (src/oiiotool)
+  add_subdirectory (src/testtex)
+  add_subdirectory (src/iv)
 endif ()
 
 # Add IO plugin directories
 if (NOT EMBEDPLUGINS)
-    add_subdirectory (bmp.imageio)
-    add_subdirectory (cineon.imageio)
-    add_subdirectory (dds.imageio)
-    add_subdirectory (dpx.imageio)
-    add_subdirectory (field3d.imageio)
-    add_subdirectory (fits.imageio)
-    add_subdirectory (hdr.imageio)
-    add_subdirectory (ico.imageio)
-    add_subdirectory (iff.imageio)
-    add_subdirectory (jpeg.imageio)
-    add_subdirectory (jpeg2000.imageio)
-    add_subdirectory (openexr.imageio)
-    add_subdirectory (png.imageio)
-    add_subdirectory (pnm.imageio)
-    add_subdirectory (psd.imageio)
-    add_subdirectory (ptex.imageio)
-    add_subdirectory (rla.imageio)
-    add_subdirectory (sgi.imageio)
-    add_subdirectory (socket.imageio)
-    add_subdirectory (softimage.imageio)
-    add_subdirectory (targa.imageio)
-    add_subdirectory (tiff.imageio)
-    add_subdirectory (webp.imageio)
-    add_subdirectory (zfile.imageio)
+    add_subdirectory (src/bmp.imageio)
+    add_subdirectory (src/cineon.imageio)
+    add_subdirectory (src/dds.imageio)
+    add_subdirectory (src/dpx.imageio)
+    add_subdirectory (src/field3d.imageio)
+    add_subdirectory (src/fits.imageio)
+    add_subdirectory (src/gif.imageio)
+    add_subdirectory (src/hdr.imageio)
+    add_subdirectory (src/ico.imageio)
+    add_subdirectory (src/iff.imageio)
+    add_subdirectory (src/jpeg.imageio)
+    add_subdirectory (src/jpeg2000.imageio)
+    add_subdirectory (src/openexr.imageio)
+    add_subdirectory (src/png.imageio)
+    add_subdirectory (src/pnm.imageio)
+    add_subdirectory (src/psd.imageio)
+    add_subdirectory (src/ptex.imageio)
+    add_subdirectory (src/rla.imageio)
+    add_subdirectory (src/sgi.imageio)
+    add_subdirectory (src/socket.imageio)
+    add_subdirectory (src/softimage.imageio)
+    add_subdirectory (src/targa.imageio)
+    add_subdirectory (src/tiff.imageio)
+    add_subdirectory (src/webp.imageio)
+    add_subdirectory (src/zfile.imageio)
 endif ()
 
 if (USE_PYTHON AND oiio_boost_PYTHON_FOUND)
-    add_subdirectory (python)
+    add_subdirectory (src/python)
 endif ()
 
-add_subdirectory (include)
-add_subdirectory (doc)
+add_subdirectory (src/include)
+add_subdirectory (src/doc)
 
 
 #########################################################################
@@ -328,17 +326,21 @@ add_subdirectory (doc)
 
 # Make a copy of the testsuite into the build area
 if (DEFINED CMAKE_VERSION AND NOT CMAKE_VERSION VERSION_LESS 2.8)
-    file (COPY ${PROJECT_SOURCE_DIR}/../testsuite
-          DESTINATION ${CMAKE_BINARY_DIR})
+    file (COPY "${PROJECT_SOURCE_DIR}/testsuite"
+          DESTINATION "${CMAKE_BINARY_DIR}")
 endif()
 
 # List all the individual testsuite tests here:
 oiio_add_tests (gpsread misnamed-file nonwhole-tiles
                 oiiotool oiiotool-composite oiiotool-fixnan 
                 perchannel
-                dpx ico png psd rla sgi
+                dpx gif ico png psd rla sgi
+                python-typedesc python-imagespec python-roi
+                python-imageinput python-imageoutput
+                python-imagebuf python-imagebufalgo
                 maketx
-                texture-blurtube texture-fill texture-filtersize
+                texture-blurtube texture-crop texture-cropover
+                texture-fill texture-filtersize
                 texture-gray texture-grid
                 texture-missing texture-overscan
                 texture-pointsample texture-width0blur texture-res
@@ -384,6 +386,14 @@ oiio_add_tests (webp
 oiio_add_tests (field3d texture-field3d
     FOUNDVAR FIELD3D_FOUND)
 
+if (SPI_TESTS)
+  oiio_add_tests (spi
+    FOUNDVAR SPI_TESTS
+    IMAGEDIR spi-oiio-tests
+    URL "noplace -- it's SPI specific tests")
+endif ()
+
+
 
 #########################################################################
 # Packaging
@@ -394,14 +404,16 @@ set (CPACK_PACKAGE_VERSION_PATCH ${OIIO_VERSION_PATCH})
 # the rest of the copyright notices say.
 set (CPACK_PACKAGE_VENDOR "Larry Gritz et al.")
 set (CPACK_PACKAGE_DESCRIPTION_SUMMARY "OpenImageIO is an open source library for reading and writing image file formats, a nice format-agnostic image viewer, and other image-related classes and utilities.")
-set (CPACK_PACKAGE_DESCRIPTION_FILE "${PROJECT_SOURCE_DIR}/doc/Description.txt")
+set (CPACK_PACKAGE_DESCRIPTION_FILE "${PROJECT_SOURCE_DIR}/src/doc/Description.txt")
 set (CPACK_PACKAGE_FILE_NAME OpenImageIO-${OIIO_VERSION_MAJOR}.${OIIO_VERSION_MINOR}.${OIIO_VERSION_PATCH}-${platform})
-#SET (CPACK_PACKAGE_INSTALL_DIRECTORY ${PROJECT_SOURCE_DIR}/..)
-exec_program ("cmake -E copy ${PROJECT_SOURCE_DIR}/../LICENSE ${CMAKE_BINARY_DIR}/License.txt")
+#SET (CPACK_PACKAGE_INSTALL_DIRECTORY "${PROJECT_SOURCE_DIR}")
+file (COPY "${PROJECT_SOURCE_DIR}/LICENSE" DESTINATION "${CMAKE_BINARY_DIR}")
+file (RENAME "${CMAKE_BINARY_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/License.txt")
 set (CPACK_RESOURCE_FILE_LICENSE "${CMAKE_BINARY_DIR}/License.txt")
-exec_program ("cmake -E copy ${PROJECT_SOURCE_DIR}/../README.rst ${CMAKE_BINARY_DIR}/Readme.rst")
+file (COPY "${PROJECT_SOURCE_DIR}/README.rst" DESTINATION "${CMAKE_BINARY_DIR}")
+file (RENAME "${CMAKE_BINARY_DIR}/README.rst" "${CMAKE_BINARY_DIR}/Readme.rst")
 set (CPACK_RESOURCE_FILE_README "${CMAKE_BINARY_DIR}/Readme.rst")
-set (CPACK_RESOURCE_FILE_WELCOME "${PROJECT_SOURCE_DIR}/doc/Welcome.txt")
+set (CPACK_RESOURCE_FILE_WELCOME "${PROJECT_SOURCE_DIR}/src/doc/Welcome.txt")
 #SET (CPACK_STRIP_FILES Do we need this?)
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
     set (CPACK_GENERATOR "TGZ;STGZ;RPM;DEB")

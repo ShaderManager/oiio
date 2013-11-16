@@ -99,18 +99,20 @@ def oiio_app (app):
     # When we use Visual Studio, built applications are stored
     # in the app/$(OutDir)/ directory, e.g., Release or Debug.
     if (platform.system () != 'Windows' or options.devenv_config == ""):
-        return os.path.join (path, app, app) + " "
+        return os.path.join (path, "src", app, app) + " "
     else:
-        return os.path.join (path, app, options.devenv_config, app) + " "
+        return os.path.join (path, "src", app, options.devenv_config, app) + " "
 
 
 # Construct a command that will print info for an image, appending output to
 # the file "out.txt".  If 'safematch' is nonzero, it will exclude printing
 # of fields that tend to change from run to run or release to release.
-def info_command (file, extraargs="", safematch=0) :
+def info_command (file, extraargs="", safematch=0, hash=True) :
     if safematch :
         extraargs += " --no-metamatch \"DateTime|Software|OriginatingProgram|ImageHistory\""
-    return (oiio_app("oiiotool") + "--info -v -a --hash " + extraargs
+    if hash :
+        extraargs += " --hash"
+    return (oiio_app("oiiotool") + "--info -v -a " + extraargs
             + " " + oiio_relpath(file,tmpdir) + " >> out.txt ;\n")
 
 
@@ -175,10 +177,20 @@ def rw_command (dir, filename, testwrite=1, use_oiiotool=0, extraargs="",
     return cmd
 
 
-# Construct a command that will test 
+# Construct a command that will testtex
 def testtex_command (file, extraargs="") :
     cmd = (oiio_app("testtex") + " " + file + " " + extraargs + " " +
            " >> out.txt ;\n")
+    return cmd
+
+
+# Construct a command that will run oiiotool and append its output to out.txt
+def oiiotool (args, silent=False, concat=True) :
+    cmd = (oiio_app("oiiotool") + " " + args)
+    if not silent :
+        cmd += " >> out.txt"
+    if concat:
+        cmd += " ;\n"
     return cmd
 
 

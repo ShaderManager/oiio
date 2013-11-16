@@ -83,6 +83,8 @@ static ustring s_format ("format"), s_cachedformat ("cachedformat");
 static ustring s_channels ("channels"), s_cachedpixeltype ("cachedpixeltype");
 static ustring s_exists ("exists");
 static ustring s_subimages ("subimages"), s_miplevels ("miplevels");
+static ustring s_datawindow ("datawindow"), s_displaywindow ("displaywindow");
+
 
 // Functor to compare filenames
 static bool
@@ -248,6 +250,10 @@ ImageCacheFile::ImageCacheFile (ImageCacheImpl &imagecache,
     m_filename = imagecache.resolve_filename (m_filename.string());
     // N.B. the file is not opened, the ImageInput is NULL.  This is
     // reflected by the fact that m_validspec is false.
+    m_Mlocal.makeIdentity();
+    m_Mproj.makeIdentity();
+    m_Mtex.makeIdentity();
+    m_Mras.makeIdentity();
 }
 
 
@@ -705,7 +711,7 @@ ImageCacheFile::read_unmipped (ImageCachePerThreadInfo *thread_info,
     stride_t xstride=AutoStride, ystride=AutoStride, zstride=AutoStride;
     spec.auto_stride(xstride, ystride, zstride, format, spec.nchannels, tw, th);
     ImageSpec lospec (tw, th, spec.nchannels, TypeDesc::FLOAT);
-    ImageBuf lores ("tmp", lospec);
+    ImageBuf lores (lospec);
 
     // Figure out the range of texels we need for this tile
     x -= spec.x;
@@ -934,20 +940,22 @@ ImageCacheFile::invalidate ()
 ImageCacheFile *
 ImageCacheImpl::find_file (ustring filename,
                            ImageCachePerThreadInfo *thread_info,
-                           ImageInput::Creator creator)
+                           ImageInput::Creator creator,
+                           bool header_only)
 {
-    ImageCacheStatistics &stats (thread_info->m_stats);
-    ImageCacheFile *tf = NULL;
-    bool newfile = false;
-
     // Debugging aid: attribute "substitute_image" forces all image
     // references to be to one named file.
     if (m_substitute_image)
         filename = m_substitute_image;
 
+    // Shortcut - check the per-thread microcache before grabbing a more
+    // expensive lock on the shared file cache.
+    ImageCacheFile *tf = thread_info->find_file (filename);
+
     // Part 1 - make sure the ImageCacheFile entry exists and is in the
     // file cache.  For this part, we need to lock the file cache.
-    {
+    bool newfile = false;
+    if (! tf) {  // was not found in microcache
 #if IMAGECACHE_TIME_STATS
         Timer timer;
 #endif
@@ -965,9 +973,9 @@ ImageCacheImpl::find_file (ustring filename,
 
         if (newfile)
             check_max_files (thread_info);
-
+        thread_info->filename (filename, tf);  // add to the microcache
 #if IMAGECACHE_TIME_STATS
-        stats.find_file_time += timer();
+        thread_info->m_stats.find_file_time += timer();
 #endif
     }
 
@@ -981,6 +989,7 @@ ImageCacheImpl::find_file (ustring filename,
             tf->open (thread_info);
             DASSERT (tf->m_broken || tf->validspec());
             double createtime = timer();
+            ImageCacheStatistics &stats (thread_info->m_stats);
             stats.fileio_time += createtime;
             stats.fileopen_time += createtime;
             tf->iotime() += createtime;
@@ -1023,15 +1032,20 @@ ImageCacheImpl::find_file (ustring filename,
     }
 
     // if this is a duplicate texture, switch to the canonical copy
-    if (tf->duplicate())
-        tf = tf->duplicate();
-    else {
+    if (tf->duplicate()) {
+        if (! header_only)
+            tf = tf->duplicate();
+        // N.B. If looking up header info (i.e., get_image_info, rather
+        // than getting pixels, use the original not the duplicate, since
+        // metadata may differ even if pixels are identical).
+    } else {
         // not a duplicate -- if opening the first time, count as unique
         if (newfile)
-            ++stats.unique_files;
+            ++thread_info->m_stats.unique_files;
     }
 
-    tf->use ();  // Mark it as recently used
+    if (! header_only)
+        tf->use ();  // Mark it as recently used
     return tf;
 }
 
@@ -1406,8 +1420,15 @@ ImageCacheImpl::getstats (int level) const
 
     std::ostringstream out;
     if (level > 0) {
-        out << "OpenImageIO ImageCache statistics (" << (void*)this 
-            << ") ver " << OIIO_VERSION_STRING << "\n";
+        out << "OpenImageIO ImageCache statistics (";
+        {
+            spin_lock guard (shared_image_cache_mutex);
+            if ((void *)this == (void *)shared_image_cache.get())
+                out << "shared";
+            else
+                out << (void *)this;
+        }
+        out << ") ver " << OIIO_VERSION_STRING << "\n";
         if (stats.unique_files) {
             out << "  Images : " << stats.unique_files << " unique\n";
             out << "    ImageInputs : " << m_stat_open_files_created << " created, " << m_stat_open_files_current << " current, " << m_stat_open_files_peak << " peak\n";
@@ -2045,7 +2066,7 @@ ImageCacheImpl::get_image_info (ustring filename, int subimage, int miplevel,
                                 TypeDesc datatype, void *data)
 {
     ImageCachePerThreadInfo *thread_info = get_perthread_info ();
-    ImageCacheFile *file = find_file (filename, thread_info);
+    ImageCacheFile *file = find_file (filename, thread_info, NULL, true);
     if (dataname == s_exists && datatype == TypeDesc::TypeInt) {
         // Just check for existence.  Need to do this before the invalid
         // file error below, since in this one case, it's not an error
@@ -2112,8 +2133,42 @@ ImageCacheImpl::get_image_info (ustring filename, int subimage, int miplevel,
         *(int *)data = file->miplevels(subimage);
         return true;
     }
-    // FIXME - "viewingmatrix"
-    // FIXME - "projectionmatrix"
+    if (dataname == s_datawindow && datatype.basetype == TypeDesc::INT &&
+        (datatype == TypeDesc(TypeDesc::INT,4) ||
+         datatype == TypeDesc(TypeDesc::INT,6))) {
+        int *d = (int *)data;
+        if (datatype.arraylen == 4) {
+            d[0] = spec.x;
+            d[1] = spec.y;
+            d[2] = spec.x + spec.width - 1;
+            d[3] = spec.y + spec.height - 1;
+        } else {
+            d[0] = spec.x;
+            d[1] = spec.y;
+            d[2] = spec.z;
+            d[3] = spec.x + spec.width - 1;
+            d[4] = spec.y + spec.height - 1;
+            d[5] = spec.z + spec.depth - 1;
+        }
+    }
+    if (dataname == s_displaywindow && datatype.basetype == TypeDesc::INT &&
+        (datatype == TypeDesc(TypeDesc::INT,4) ||
+         datatype == TypeDesc(TypeDesc::INT,6))) {
+        int *d = (int *)data;
+        if (datatype.arraylen == 4) {
+            d[0] = spec.full_x;
+            d[1] = spec.full_y;
+            d[2] = spec.full_x + spec.full_width - 1;
+            d[3] = spec.full_y + spec.full_height - 1;
+        } else {
+            d[0] = spec.full_x;
+            d[1] = spec.full_y;
+            d[2] = spec.full_z;
+            d[3] = spec.full_x + spec.full_width - 1;
+            d[4] = spec.full_y + spec.full_height - 1;
+            d[5] = spec.full_z + spec.full_depth - 1;
+        }
+    }
 
     // general case -- handle anything else that's able to be found by
     // spec.find_attribute().
@@ -2158,7 +2213,7 @@ ImageCacheImpl::imagespec (ustring filename, int subimage, int miplevel,
                            bool native)
 {
     ImageCachePerThreadInfo *thread_info = get_perthread_info ();
-    ImageCacheFile *file = find_file (filename, thread_info);
+    ImageCacheFile *file = find_file (filename, thread_info, NULL, true);
     if (! file) {
         error ("Image file \"%s\" not found", filename.c_str());
         return NULL;
@@ -2512,36 +2567,68 @@ ImageCacheImpl::invalidate (ustring filename)
 void
 ImageCacheImpl::invalidate_all (bool force)
 {
+    // Special case: invalidate EVERYTHING -- we can take some shortcuts
+    // to do it all in one shot.
+    if (force) {
+        // Clear the whole tile cache
+        std::vector<TileID> tiles_to_delete;
+        for (TileCache::iterator t = m_tilecache.begin(), e = m_tilecache.end();
+             t != e;  ++t) {
+            tiles_to_delete.push_back (t->second->id());
+        }
+        BOOST_FOREACH (const TileID &id, tiles_to_delete) {
+            m_tilecache.erase (id);
+        }
+        // Invalidate (close and clear spec) all individual files
+        for (FilenameMap::iterator fileit = m_files.begin(), e = m_files.end();
+                 fileit != e;  ++fileit) {
+            fileit->second->invalidate ();
+        }
+        // Clear fingerprints list
+        clear_fingerprints ();
+        // Mark the per-thread microcaches as invalid
+        purge_perthread_microcaches ();
+        return;
+    }
+
+    // Not forced... we need to look for particular files that seem
+    // to need invalidation.
+
     // Make a list of all files that need to be invalidated
     std::vector<ustring> all_files;
-
     for (FilenameMap::iterator fileit = m_files.begin(), e = m_files.end();
              fileit != e;  ++fileit) {
         ImageCacheFileRef &f (fileit->second);
         ustring name = f->filename();
         recursive_lock_guard guard (f->m_input_mutex);
+        // If the file was broken when we opened it, or if it no longer
+        // exists, definitely invalidate it.
         if (f->broken() || ! Filesystem::exists(name.string())) {
             all_files.push_back (name);
             continue;
         }
-        std::time_t t = Filesystem::last_write_time (name.string());
         // Invalidate the file if it has been modified since it was
-        // last opened, or if 'force' is true.
-        bool inval = force || (t != f->mod_time());
-        for (int s = 0;  !inval && s < f->subimages();  ++s) {
+        // last opened.
+        std::time_t t = Filesystem::last_write_time (name.string());
+        if (t != f->mod_time()) {
+            all_files.push_back (name);
+            continue;
+        }
+        // Invalidate if any unmipped subimage...
+        // ... didn't automip, but automip is now on
+        // ... did automip, but automip is now off
+        for (int s = 0;  s < f->subimages();  ++s) {
             ImageCacheFile::SubimageInfo &sub (f->subimageinfo(s));
-            // Invalidate if any unmipped subimage:
-            // ... didn't automip, but automip is now on
-            // ... did automip, but automip is now off
             if (sub.unmipped &&
                 ((m_automip && f->miplevels(s) <= 1) ||
-                 (!m_automip && f->miplevels(s) > 1)))
-                inval = true;
+                 (!m_automip && f->miplevels(s) > 1))) {
+                all_files.push_back (name);
+                break;
+            }
         }
-        if (inval)
-            all_files.push_back (name);
     }
 
+    // Now, invalidate all the files in our "needs invalidation" list
     BOOST_FOREACH (ustring f, all_files) {
         // fprintf (stderr, "Invalidating %s\n", f.c_str());
         invalidate (f);
@@ -2702,22 +2789,32 @@ ImageCache::create (bool shared)
 
 
 void
-ImageCache::destroy (ImageCache *x)
+ImageCache::destroy (ImageCache *x, bool teardown)
 {
-    // If this is not a shared cache, delete it for real.  But if it is
-    // the same as the shared cache, don't really delete it, since others
-    // may be using it now, or may request a shared cache some time in
-    // the future.  Don't worry that it will leak; because shared_image_cache
-    // is itself a shared_ptr, when the process ends it will properly
-    // destroy the shared cache.
+    if (! x)
+        return;
     spin_lock guard (shared_image_cache_mutex);
     if (x == shared_image_cache.get()) {
-        // Don't destroy the shared cache, but do invalidate and close the files.
-        ((ImageCacheImpl *)x)->invalidate_all ();
+        // This is the shared cache, so don't really delete it. Invalidate
+        // it fully, closing the files and throwing out any tiles that 
+        // nobody is currently holding references to.  But only delete the
+        // IC fully if 'teardown' is true, and even then, it won't destroy
+        // until nobody else is still holding a shared_ptr to it.
+        ((ImageCacheImpl *)x)->invalidate_all (teardown);
+        if (teardown)
+            shared_image_cache.reset ();
     } else {
         // Not a shared cache, we are the only owner, so truly destroy it.
         delete (ImageCacheImpl *) x;
     }
+}
+
+
+
+void
+ImageCache::destroy (ImageCache *x)
+{
+    destroy (x, false);
 }
 
 }

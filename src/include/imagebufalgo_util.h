@@ -92,16 +92,28 @@ parallel_image (Func f, ROI roi, int nthreads=0)
 
 
 
-/// Common preparation for IBA functions: Given an ROI (which may or may
-/// not be the default ROI::All()), destination image (which may or may
-/// not yet be allocated), and optional input images, adjust roi if
-/// necessary and allocate pixels for dst if necessary.  If dst is
-/// already initialized, it will keep its "full" (aka display) window,
-/// otherwise its full/display window will be set to the union of
-/// A's and B's full/display windows.  If you want something different,
-/// then define dest ahead of time!
-void OIIO_API IBAprep (ROI &roi, ImageBuf *dst,
-                       const ImageBuf *A=NULL, const ImageBuf *B=NULL);
+/// Common preparation for IBA functions: Given an ROI (which may or may not
+/// be the default ROI::All()), destination image (which may or may not yet
+/// be allocated), and optional input images, adjust roi if necessary and
+/// allocate pixels for dst if necessary.  If dst is already initialized, it
+/// will keep its "full" (aka display) window, otherwise its full/display
+/// window will be set to the union of A's and B's full/display windows.  If
+/// dst is uninitialized and  force_spec is not NULL, use *force_spec as
+/// dst's new spec rather than using A's.  Also, if A or B inputs are
+/// specified but not initialized or broken, it's an error so return false.
+/// If all is ok, return true.  Some additional checks and behaviors may be
+/// specified by the 'prepflags', which is a bit field defined by
+/// IBAprep_flags.
+bool OIIO_API IBAprep (ROI &roi, ImageBuf *dst,
+                       const ImageBuf *A=NULL, const ImageBuf *B=NULL,
+                       ImageSpec *force_spec=NULL, int prepflags=0);
+
+enum IBAprep_flags {
+    IBAprep_DEFAULT = 0,
+    IBAprep_REQUIRE_ALPHA = 1,
+    IBAprep_REQUIRE_Z = 2,
+    IBAprep_REQUIRE_SAME_NCHANNELS = 4
+};
 
 
 

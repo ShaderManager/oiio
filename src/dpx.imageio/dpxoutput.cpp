@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <iomanip>
 
 #include "libdpx/DPX.h"
 #include "libdpx/DPXColorConverter.h"
@@ -52,7 +53,6 @@ public:
     virtual ~DPXOutput ();
     virtual const char * format_name (void) const { return "dpx"; }
     virtual bool supports (const std::string &feature) const {
-        // Support nothing nonstandard
         if (feature == "multiimage"
             || feature == "random_access"
             || feature == "rewrite"
@@ -116,6 +116,10 @@ private:
     /// Helper function - retrieve libdpx descriptor for string
     ///
     dpx::Descriptor get_descriptor_from_string (const std::string &str);
+
+    /// Helper function - set keycode values from int array
+    ///
+    void set_keycode_values (int *array);
 };
 
 
@@ -260,17 +264,18 @@ DPXOutput::open (const std::string &name, const ImageSpec &userspec,
     for (int s = 0;  s < m_subimages_to_write;  ++s) {
         prep_subimage (s, false);
         m_dpx.header.SetBitDepth (s, m_bitdepth);
-        bool datasign = (m_spec.format == TypeDesc::INT8 ||
-                         m_spec.format == TypeDesc::INT16);
+        ImageSpec &spec (m_subimage_specs[s]);
+        bool datasign = (spec.format == TypeDesc::INT8 ||
+                         spec.format == TypeDesc::INT16);
         m_dpx.SetElement (s, m_desc, m_bitdepth, m_transfer, m_cmetr,
                           m_packing, dpx::kNone, datasign,
-                          m_spec.get_int_attribute ("dpx:LowData", 0xFFFFFFFF),
-                          m_spec.get_float_attribute ("dpx:LowQuantity", std::numeric_limits<float>::quiet_NaN()),
-                          m_spec.get_int_attribute ("dpx:HighData", 0xFFFFFFFF),
-                          m_spec.get_float_attribute ("dpx:HighQuantity", std::numeric_limits<float>::quiet_NaN()),
-                          m_spec.get_int_attribute ("dpx:EndOfLinePadding", 0),
-                          m_spec.get_int_attribute ("dpx:EndOfImagePadding", 0));
-        std::string desc = m_spec.get_string_attribute ("ImageDescription", "");
+                          spec.get_int_attribute ("dpx:LowData", 0xFFFFFFFF),
+                          spec.get_float_attribute ("dpx:LowQuantity", std::numeric_limits<float>::quiet_NaN()),
+                          spec.get_int_attribute ("dpx:HighData", 0xFFFFFFFF),
+                          spec.get_float_attribute ("dpx:HighQuantity", std::numeric_limits<float>::quiet_NaN()),
+                          spec.get_int_attribute ("dpx:EndOfLinePadding", 0),
+                          spec.get_int_attribute ("dpx:EndOfImagePadding", 0));
+        std::string desc = spec.get_string_attribute ("ImageDescription", "");
         m_dpx.header.SetDescription (s, desc.c_str());
     }
 
@@ -293,9 +298,6 @@ DPXOutput::open (const std::string &name, const ImageSpec &userspec,
     if (tmpstr.size () > 0)
         m_dpx.header.SetVersion (tmpstr.c_str ());*/
     std::string tmpstr;
-    tmpstr = m_spec.get_string_attribute ("dpx:Format", "");
-    if (tmpstr.size () > 0)
-        m_dpx.header.SetFormat (tmpstr.c_str ());
     tmpstr = m_spec.get_string_attribute ("dpx:FrameId", "");
     if (tmpstr.size () > 0)
         m_dpx.header.SetFrameId (tmpstr.c_str ());
@@ -350,13 +352,33 @@ DPXOutput::open (const std::string &name, const ImageSpec &userspec,
     orient = DpxOrientations[clamp (orient, 0, 8)];
     m_dpx.header.SetImageOrientation ((dpx::Orientation)orient);
 
-    std::string timecode = m_spec.get_string_attribute ("dpx:TimeCode", "");
-    int tmpint = m_spec.get_int_attribute ("dpx:TimeCode", ~0);
-    if (timecode.size () > 0)
-        m_dpx.header.SetTimeCode (timecode.c_str ());
-    else if (tmpint != ~0)
+    ImageIOParameter *tc = m_spec.find_attribute("smpte:TimeCode", TypeDesc::TypeTimeCode, false);
+    if (tc) {
+        unsigned int *timecode = (unsigned int*) tc->data();
+        m_dpx.header.timeCode = timecode[0];
+        m_dpx.header.userBits = timecode[1];
+    }
+    else {
+        std::string timecode = m_spec.get_string_attribute ("dpx:TimeCode", "");
+        int tmpint = m_spec.get_int_attribute ("dpx:TimeCode", ~0);
+        if (timecode.size () > 0)
+            m_dpx.header.SetTimeCode (timecode.c_str ());
+        else if (tmpint != ~0)
         m_dpx.header.timeCode = tmpint;
-    m_dpx.header.userBits = m_spec.get_int_attribute ("dpx:UserBits", ~0);
+        m_dpx.header.userBits = m_spec.get_int_attribute ("dpx:UserBits", ~0);
+    }
+
+    ImageIOParameter *kc = m_spec.find_attribute("smpte:KeyCode", TypeDesc::TypeKeyCode, false);
+    if (kc) {
+        int *array = (int*) kc->data();
+        set_keycode_values(array);
+
+        // See if there is an overloaded dpx:Format
+        std::string format = m_spec.get_string_attribute ("dpx:Format", "");
+        if (format.size () > 0)
+            m_dpx.header.SetFormat (format.c_str ());
+    }
+
     std::string srcdate = m_spec.get_string_attribute ("dpx:SourceDateTime", "");
     if (srcdate.size () >= 19) {
         // libdpx's date/time format is pretty close to OIIO's (libdpx uses
@@ -537,7 +559,7 @@ DPXOutput::write_scanline (int y, int z, TypeDesc format,
                           data = &m_scratch[0];
     }
 
-    unsigned char *dst = &m_buf[y * m_bytes];
+    unsigned char *dst = &m_buf[(y-m_spec.y) * m_bytes];
     if (m_wantRaw)
         // fast path - just dump the scanline into the buffer
         memcpy (dst, data, m_spec.scanline_bytes ());
@@ -641,6 +663,71 @@ DPXOutput::get_descriptor_from_string (const std::string &str)
         return dpx::kCbYCrA;
     //else if (Strutil::iequals (str, "Undefined"))
         return dpx::kUndefinedDescriptor;
+}
+
+
+void
+DPXOutput::set_keycode_values (int *array)
+{
+    // Manufacturer code
+    {
+        std::stringstream ss;
+        ss << std::setfill('0');
+        ss << std::setw(2) << array[0];
+        memcpy(m_dpx.header.filmManufacturingIdCode, ss.str().c_str(), 2);
+    }
+
+    // Film type
+    {
+        std::stringstream ss;
+        ss << std::setfill('0');
+        ss << std::setw(2) << array[1];
+        memcpy(m_dpx.header.filmType, ss.str().c_str(), 2);
+    }
+
+    // Prefix
+    {
+        std::stringstream ss;
+        ss << std::setfill('0');
+        ss << std::setw(6) << array[2];
+        memcpy(m_dpx.header.prefix, ss.str().c_str(), 6);
+    }
+
+    // Count
+    {
+        std::stringstream ss;
+        ss << std::setfill('0');
+        ss << std::setw(4) << array[3];
+        memcpy(m_dpx.header.count, ss.str().c_str(), 4);
+    }
+
+    // Perforation Offset
+    {
+        std::stringstream ss;
+        ss << std::setfill('0');
+        ss << std::setw(2) << array[4];
+        memcpy(m_dpx.header.perfsOffset, ss.str().c_str(), 2);
+    }
+
+    // Format
+    int &perfsPerFrame = array[5];
+    int &perfsPerCount = array[6];
+
+    if (perfsPerFrame == 15 && perfsPerCount == 120) {
+        strcpy(m_dpx.header.format, "8kimax");
+    }
+    else if (perfsPerFrame == 8 && perfsPerCount == 64) {
+        strcpy(m_dpx.header.format, "VistaVision");
+    }
+    else if (perfsPerFrame == 4 && perfsPerCount == 64) {
+        strcpy(m_dpx.header.format, "Full Aperture");
+    }
+    else if (perfsPerFrame == 3 && perfsPerCount == 64) {
+        strcpy(m_dpx.header.format, "3perf");
+    }
+    else {
+        strcpy(m_dpx.header.format, "Unknown");
+    }
 }
 
 OIIO_PLUGIN_NAMESPACE_END

@@ -66,8 +66,6 @@ OIIO_NAMESPACE_ENTER
 
 namespace {  // anonymous
 
-static shared_ptr<TextureSystemImpl> shared_texsys;
-static mutex shared_texsys_mutex;
 static EightBitConverter<float> uchar2float;
 
 }  // end anonymous namespace
@@ -77,21 +75,22 @@ TextureSystem *
 TextureSystem::create (bool shared)
 {
     ImageCache *ic = ImageCache::create (shared);
-#if 0
-    if (shared) {
-        // They requested a shared texsys.  If a shared texsys already
-        // exists, just return it, otherwise record the new cache.
-        lock_guard guard (shared_texsys_mutex);
-        if (! shared_texsys.get())
-            shared_texsys.reset (new TextureSystemImpl (ic));
-#ifndef NDEBUG
-        std::cerr << " shared TextureSystem is "
-                  << (void *)shared_texsys.get() << "\n";
-#endif
-        return shared_texsys.get ();
-    }
-#endif
     return new TextureSystemImpl (ic);
+}
+
+
+
+void
+TextureSystem::destroy (TextureSystem *x, bool teardown_imagecache)
+{
+    if (! x)
+        return;
+    TextureSystemImpl *impl = (TextureSystemImpl *) x;
+    if (teardown_imagecache) {
+        ImageCache::destroy (impl->m_imagecache, true);
+        impl->m_imagecache = NULL;
+    }
+    delete (TextureSystemImpl *) impl;
 }
 
 
@@ -99,10 +98,7 @@ TextureSystem::create (bool shared)
 void
 TextureSystem::destroy (TextureSystem *x)
 {
-    // Delete only if it's a private one
-//    lock_guard guard (shared_texsys_mutex);
-//    if (x != shared_texsys.get())
-        delete (TextureSystemImpl *) x;
+    destroy (x, false);
 }
 
 
@@ -224,8 +220,7 @@ TextureSystemImpl::getstats (int level, bool icstats) const
     bool anytexture = (stats.texture_queries + stats.texture3d_queries +
                        stats.shadow_queries + stats.environment_queries);
     if (level > 0 && anytexture) {
-        out << "OpenImageIO Texture statistics (" << (void*)this
-            << ", cache = " << (void *)m_imagecache << ")\n";
+        out << "OpenImageIO Texture statistics\n";
         out << "  Queries/batches : \n";
         out << "    texture     :  " << stats.texture_queries
             << " queries in " << stats.texture_batches << " batches\n";
@@ -1891,7 +1886,7 @@ TextureSystemImpl::visualize_ellipse (const std::string &name,
     float scale = 100;
     int w = 256, h = 256;
     ImageSpec spec (w, h, 3);
-    ImageBuf ib (name, spec);
+    ImageBuf ib (spec);
     static float dark[3] = { 0.2, 0.2, 0.2 };
     static float white[3] = { 1, 1, 1 };
     static float grey[3] = { 0.5, 0.5, 0.5 };
@@ -1930,7 +1925,7 @@ TextureSystemImpl::visualize_ellipse (const std::string &name,
                                            yy-size/2, yy+size/2+1));
     }
 
-    ib.save ();
+    ib.write (name);
 }
 
 
