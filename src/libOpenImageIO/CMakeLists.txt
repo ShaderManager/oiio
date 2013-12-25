@@ -53,6 +53,7 @@ set (libOpenImageIO_srcs exif.cpp formatspec.cpp imagebuf.cpp
                           ../libutil/SHA1.cpp 
                           ../libutil/strutil.cpp 
                           ../libutil/sysutil.cpp 
+                          ../libutil/timer.cpp 
                           ../libutil/typedesc.cpp 
                           ../libutil/ustring.cpp 
                           ../libtexture/texturesys.cpp 
@@ -318,15 +319,15 @@ endif ()
 if (OIIO_BUILD_TESTS)
 
 add_executable (imagebuf_test imagebuf_test.cpp)
-link_ilmbase (imagebuf_test)
 set_target_properties (imagebuf_test PROPERTIES FOLDER "Unit Tests")
 target_link_libraries (imagebuf_test OpenImageIO ${Boost_LIBRARIES} ${CMAKE_DL_LIBS})
+link_ilmbase (imagebuf_test)
 add_test (unit_imagebuf imagebuf_test)
 
 add_executable (imagebufalgo_test imagebufalgo_test.cpp)
-link_ilmbase (imagebufalgo_test)
 set_target_properties (imagebufalgo_test PROPERTIES FOLDER "Unit Tests")
 target_link_libraries (imagebufalgo_test OpenImageIO ${Boost_LIBRARIES} ${CMAKE_DL_LIBS})
+link_ilmbase (imagebufalgo_test)
 add_test (unit_imagebufalgo imagebufalgo_test)
 
 add_executable (atomic_test atomic_test.cpp)
@@ -382,6 +383,7 @@ add_test (unit_hash hash_test)
 add_executable (imagespeed_test imagespeed_test.cpp)
 set_target_properties (imagespeed_test PROPERTIES FOLDER "Unit Tests")
 target_link_libraries (imagespeed_test OpenImageIO ${Boost_LIBRARIES} ${CMAKE_DL_LIBS})
+link_ilmbase (imagespeed_test)
 #add_test (imagespeed_test imagespeed_test)
 
 add_executable (timer_test timer_test.cpp)

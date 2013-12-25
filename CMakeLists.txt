@@ -42,10 +42,18 @@ if (CMAKE_COMPILER_IS_GNUCC)
                      OUTPUT_STRIP_TRAILING_WHITESPACE)
     message (STATUS "Using gcc ${GCC_VERSION} as the compiler")
 endif ()
+message (STATUS "CMAKE_CXX_COMPILER is ${CMAKE_CXX_COMPILER}")
 message (STATUS "CMAKE_CXX_COMPILER_ID is ${CMAKE_CXX_COMPILER_ID}")
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     set (CMAKE_COMPILER_IS_CLANG 1)
     message (STATUS "Using clang as the compiler")
+endif ()
+# Second try: for earlier versions of CMake, the CMAKE_CXX_COMPILER_ID
+# appears to be unreliable and may say "GNU" despite using clang, so
+# directly match against the compiler name.
+if ("${CMAKE_CXX_COMPILER}" MATCHES ".*clang.*")
+    set (CMAKE_COMPILER_IS_CLANG 1)
+    message (STATUS "The compiler seems to be clang")
 endif ()
 
 ## turn on more detailed warnings and consider warnings as errors
@@ -68,6 +76,7 @@ if (CMAKE_COMPILER_IS_CLANG)
     # to change just for the sake of having no warnings.
     add_definitions ("-Wno-unused-function")
     add_definitions ("-Wno-overloaded-virtual")
+    add_definitions ("-Wno-unneeded-internal-declaration")
     # disable warning about unused command line arguments
     add_definitions ("-Qunused-arguments")
 endif ()
@@ -107,6 +116,7 @@ set (USE_OPENSSL ON CACHE BOOL "Use OpenSSL if found")
 set (USE_FREETYPE ON CACHE BOOL "Use Freetype if found")
 set (USE_GIF ON CACHE BOOL "Use GIF if found")
 set (NOTHREADS OFF CACHE BOOL "Compile with no threads or locking")
+set (OIIO_THREAD_ALLOW_DCLP ON CACHE BOOL "OIIO threads may use DCLP for speed")
 set (PYTHON_VERSION 2.6)
 set (USE_EXTERNAL_PUGIXML OFF CACHE BOOL
      "Use an externally built shared library version of the pugixml library")
@@ -126,6 +136,9 @@ if (NOTHREADS)
 else ()
     if (VERBOSE)
         message (STATUS "Building with thread support")
+        if (NOT OIIO_THREAD_ALLOW_DCLP)
+            add_definitions ("-DOIIO_THREAD_ALLOW_DCLP=0")
+        endif ()
     endif ()
 endif ()
 
@@ -334,7 +347,7 @@ endif()
 oiio_add_tests (gpsread misnamed-file nonwhole-tiles
                 oiiotool oiiotool-composite oiiotool-fixnan 
                 perchannel
-                dpx gif ico png psd rla sgi
+                dpx ico png psd rla sgi
                 python-typedesc python-imagespec python-roi
                 python-imageinput python-imageoutput
                 python-imagebuf python-imagebufalgo
@@ -365,10 +378,19 @@ oiio_add_tests (openexr-suite openexr-multires openexr-chroma openexr-v2
     IMAGEDIR openexr-images
     URL http://www.openexr.com/downloads.html)
 
+oiio_add_tests (gif
+    FOUNDVAR GIF_FOUND
+    IMAGEDIR oiio-images
+    URL "Recent checkout of oiio-images")
+
 oiio_add_tests (jpeg2000
     FOUNDVAR OPENJPEG_FOUND
     IMAGEDIR j2kp4files_v1_5
     URL http://www.itu.int/net/ITU-T/sigdb/speimage/ImageForm-s.aspx?val=10100803)
+
+oiio_add_tests (pnm
+    IMAGEDIR oiio-images/pnm
+    URL "Recent checkout of oiio-images")
 
 oiio_add_tests (targa-tgautils
     IMAGEDIR TGAUTILS
