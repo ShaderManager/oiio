@@ -128,7 +128,7 @@ print_stats_num (float val, int maxval, bool round)
     } else {
         float fval = val * static_cast<float>(maxval);
         if (round) {
-            int v = static_cast<int>(roundf (fval));
+            int v = static_cast<int>(::roundf (fval));
             printf ("%d", v);
         } else {
             printf ("%0.2f", fval);

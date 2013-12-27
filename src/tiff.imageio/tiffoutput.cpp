@@ -34,6 +34,7 @@
 #include <cmath>
 #include <ctime>
 #include <iostream>
+#include <algorithm>
 
 #include <tiffio.h>
 

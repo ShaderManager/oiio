@@ -39,6 +39,7 @@
 #include <iterator>
 #include <string>
 #include <sstream>
+#include <algorithm>
 
 #include "strutil.h"
 #include "sysutil.h"
