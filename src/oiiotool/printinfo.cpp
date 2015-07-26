@@ -191,14 +191,14 @@ print_stats_num (float val, int maxval, bool round)
     // Ensure uniform printing of NaN and Inf on all platforms
     if (isnan(val))
         printf ("nan");
-    else if (isinf(val))
+    else if (::isinf(val))
         printf ("inf");
     else if (maxval == 0) {
         printf("%f",val);
     } else {
         float fval = val * static_cast<float>(maxval);
         if (round) {
-            int v = static_cast<int>(roundf (fval));
+            int v = static_cast<int>(::roundf (fval));
             printf ("%d", v);
         } else {
             printf ("%0.2f", fval);

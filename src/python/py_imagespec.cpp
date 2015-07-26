@@ -364,7 +364,7 @@ ImageSpec_get_string_attribute_d (const ImageSpec& spec, const char *name,
 
 void declare_imagespec()
 {
-    boost::python::class_<ImageSpec>("ImageSpec")
+    class_<ImageSpec>("ImageSpec")
         .def_readwrite("x",             &ImageSpec::x)
         .def_readwrite("y",             &ImageSpec::y)
         .def_readwrite("z",             &ImageSpec::z)
@@ -390,7 +390,6 @@ void declare_imagespec()
         .def_readwrite("z_channel",     &ImageSpec::z_channel)
         .def_readwrite("deep",          &ImageSpec::deep)
         .add_property("extra_attribs", 
-            boost::python::make_getter(&ImageSpec::extra_attribs))//ImageIOParameterList
         
         .def(boost::python::init<TypeDesc>())
         .def(init<int, int, int, TypeDesc::BASETYPE>())

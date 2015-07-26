@@ -32,6 +32,7 @@
 #include <fstream>
 #include <vector>
 #include <map>
+#include <algorithm>
 
 #include <boost/bind.hpp>
 #include <boost/function.hpp>
