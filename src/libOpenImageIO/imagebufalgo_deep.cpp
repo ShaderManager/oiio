@@ -36,12 +36,11 @@
 #include <iostream>
 #include <stdexcept>
 
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "imagebufalgo_util.h"
-#include "dassert.h"
-#include "sysutil.h"
-#include "thread.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/imagebufalgo_util.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/thread.h"
 
 
 OIIO_NAMESPACE_ENTER
@@ -95,13 +94,6 @@ flatten_ (ImageBuf &dst, const ImageBuf &src,
         return true;
     }
 
-    // We need to convert our "cumulative" alpha values to the
-    // "local" values that OpenEXR conventions dictate.
-    // For cumulative values cum[i] and alpha[i], we can derive
-    // local val[i] as follows:
-    //       cum[i] = cum[i-1] + (1 - alpha[i-1]) * val[i]
-    //       val[i] = (cum[i] - cum[i-1]) / (1 - alpha[i-1])
-
     const ImageSpec &srcspec (src.spec());
     int nc = srcspec.nchannels;
 
@@ -115,8 +107,12 @@ flatten_ (ImageBuf &dst, const ImageBuf &src,
         dst.error ("No alpha channel could be identified");
         return false;
     }
-
+    ASSERT (alpha_channel >= 0 ||
+            (RA_channel >= 0 && GA_channel >= 0 && BA_channel >= 0));
     float *val = ALLOCA (float, nc);
+    float &RAval (RA_channel >= 0 ? val[RA_channel] : val[alpha_channel]);
+    float &GAval (GA_channel >= 0 ? val[GA_channel] : val[alpha_channel]);
+    float &BAval (BA_channel >= 0 ? val[BA_channel] : val[alpha_channel]);
 
     for (ImageBuf::Iterator<DSTTYPE> r (dst, roi);  !r.done();  ++r) {
         int x = r.x(), y = r.y(), z = r.z();
@@ -127,29 +123,25 @@ flatten_ (ImageBuf &dst, const ImageBuf &src,
             val[Z_channel] = 1.0e30;
         if (Zback_channel >= 0 && samps == 0)
             val[Zback_channel] = 1.0e30;
-
         for (int s = 0;  s < samps;  ++s) {
-            float RA, GA, BA, alpha;   // The running totals
-            if (RA_channel >= 0) {
-                RA = val[RA_channel];
-                GA = val[GA_channel];
-                BA = val[BA_channel];
-                alpha = (RA + GA + BA) / 3.0f;
-            } else {
-                alpha = val[alpha_channel];
-                RA = GA = BA = alpha;
-            }
-            if (alpha >= 1)
+            float RA = RAval, GA = GAval, BA = BAval;  // make copies
+            float alpha = (RA + GA + BA) / 3.0f;
+            if (alpha >= 1.0f)
                 break;
             for (int c = 0;  c < nc;  ++c) {
-                float a = alpha;
+                float v = src.deep_value (x, y, z, c, s);
+                if (c == Z_channel || c == Zback_channel)
+                    val[c] *= alpha;  // because Z are not premultiplied
+                float a;
                 if (c == R_channel)
                     a = RA;
                 else if (c == G_channel)
                     a = GA;
                 else if (c == B_channel)
                     a = BA;
-                val[c] += (1.0f - a) * src.deep_value (x, y, z, c, s);
+                else
+                    a = alpha;
+                val[c] += (1.0f - a) * v;
             }
         }
 
@@ -165,12 +157,18 @@ bool
 ImageBufAlgo::flatten (ImageBuf &dst, const ImageBuf &src,
                        ROI roi, int nthreads)
 {
+    if (! src.deep()) {
+        // For some reason, we were asked to flatten an already-flat image.
+        // So just copy it.
+        return dst.copy (src);
+    }
+
     // Construct an ideal spec for dst, which is like src but not deep.
     ImageSpec force_spec = src.spec();
     force_spec.deep = false;
     force_spec.channelformats.clear();
 
-    if (! IBAprep (roi, &dst, &src, NULL, &force_spec))
+    if (! IBAprep (roi, &dst, &src, NULL, &force_spec, IBAprep_SUPPORT_DEEP))
         return false;
     if (dst.spec().deep) {
         dst.error ("Cannot flatten to a deep image");
@@ -188,8 +186,102 @@ ImageBufAlgo::flatten (ImageBuf &dst, const ImageBuf &src,
         return false;
     }
 
-    OIIO_DISPATCH_TYPES ("flatten", flatten_, dst.spec().format,
+    bool ok;
+    OIIO_DISPATCH_TYPES (ok, "flatten", flatten_, dst.spec().format,
                          dst, src, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::deepen (ImageBuf &dst, const ImageBuf &src, float zvalue,
+                      ROI roi, int nthreads)
+{
+    if (src.deep()) {
+        // For some reason, we were asked to deepen an already-deep image.
+        // So just copy it.
+        return dst.copy (src);
+        // FIXME: once paste works for deep files, this should really be
+        // return paste (dst, roi.xbegin, roi.ybegin, roi.zbegin, roi.chbegin,
+        //               src, roi, nthreads);
+    }
+
+    // Construct an ideal spec for dst, which is like src but deep.
+    const ImageSpec &srcspec (src.spec());
+    int nc = srcspec.nchannels;
+    int zback_channel = -1;
+    ImageSpec force_spec = srcspec;
+    force_spec.deep = true;
+    force_spec.set_format (TypeDesc::FLOAT);
+    force_spec.channelformats.clear();
+    for (int c = 0; c < nc; ++c) {
+        if (force_spec.channelnames[c] == "Z")
+            force_spec.z_channel = c;
+        else if (force_spec.channelnames[c] == "Zback")
+            zback_channel = c;
+    }
+    bool add_z_channel = (force_spec.z_channel < 0);
+    if (add_z_channel) {
+        // No z channel? Make one.
+        force_spec.z_channel = force_spec.nchannels++;
+        force_spec.channelnames.push_back ("Z");
+    }
+
+    if (! IBAprep (roi, &dst, &src, NULL, &force_spec, IBAprep_SUPPORT_DEEP))
+        return false;
+    if (! dst.deep()) {
+        dst.error ("Cannot deepen to a flat image");
+        return false;
+    }
+
+    float *pixel = OIIO_ALLOCA (float, nc);
+
+    // First, figure out which pixels get a sample and which do not
+    for (int z = roi.zbegin; z < roi.zend; ++z)
+    for (int y = roi.ybegin; y < roi.yend; ++y)
+    for (int x = roi.xbegin; x < roi.xend; ++x) {
+        bool has_sample = false;
+        src.getpixel (x, y, z, pixel);
+        for (int c = 0; c < nc; ++c)
+            if (c != force_spec.z_channel && c != zback_channel
+                  && pixel[c] != 0.0f) {
+                has_sample = true;
+                break;
+            }
+        if (! has_sample && ! add_z_channel)
+            for (int c = 0; c < nc; ++c)
+                if ((c == force_spec.z_channel || c == zback_channel)
+                    && (pixel[c] != 0.0f && pixel[c] < 1e30)) {
+                    has_sample = true;
+                    break;
+                }
+        if (has_sample)
+            dst.set_deep_samples (x, y, z, 1);
+    }
+
+    dst.deep_alloc ();
+
+    // Now actually set the values
+    for (int z = roi.zbegin; z < roi.zend; ++z)
+    for (int y = roi.ybegin; y < roi.yend; ++y)
+    for (int x = roi.xbegin; x < roi.xend; ++x) {
+        if (dst.deep_samples (x, y, z) == 0)
+            continue;
+        for (int c = 0; c < nc; ++c)
+            dst.set_deep_value (x, y, z, c, 0 /*sample*/,
+                                src.getchannel (x, y, z, c));
+        if (add_z_channel)
+            dst.set_deep_value (x, y, z, nc, 0, zvalue);
+    }
+
+    bool ok = true;
+    // FIXME -- the above doesn't split into threads. Someday, it should
+    // be refactored like this:
+    // OIIO_DISPATCH_COMMON_TYPES2 (ok, "deepen", deepen_,
+    //                              dst.spec().format, srcspec.format,
+    //                              dst, src, add_z_channel, z, roi, nthreads);
+    return ok;
 }
 
 

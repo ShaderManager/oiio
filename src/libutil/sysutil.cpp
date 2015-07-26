@@ -58,8 +58,9 @@
 # include <sys/sysctl.h>
 #endif
 
+#include "OpenImageIO/platform.h"
+
 #ifdef _WIN32
-# include "osdep.h"
 # include <Psapi.h>
 #else
 # include <sys/resource.h>
@@ -70,9 +71,8 @@
 # include <sys/ioctl.h>
 #endif
 
-#include "dassert.h"
-
-#include "sysutil.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/sysutil.h"
 
 OIIO_NAMESPACE_ENTER
 {
@@ -245,7 +245,7 @@ Sysutil::this_program_path ()
     size_t cb = sizeof(filename);
     int r=1;
     sysctl(mib, 4, filename, &cb, NULL, 0);
-#elif defined(__GNU__)
+#elif defined(__GNU__) || defined(__OpenBSD__)
     int r = 0;
 #else
     // No idea what platform this is

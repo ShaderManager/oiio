@@ -32,10 +32,10 @@
 #include <cstdlib>
 #include <cmath>
 
-#include "dassert.h"
-#include "imageio.h"
-#include "thread.h"
-#include "filesystem.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/thread.h"
+#include "OpenImageIO/filesystem.h"
 
 #include <OpenEXR/ImathVec.h>
 
@@ -61,6 +61,9 @@ public:
     Field3DInput () { init(); }
     virtual ~Field3DInput () { close(); }
     virtual const char * format_name (void) const { return "field3d"; }
+    virtual int supports (string_view feature) const {
+        return (feature == "arbitrary_metadata");
+    }
     virtual bool valid_file (const std::string &filename) const;
     virtual bool open (const std::string &name, ImageSpec &newspec);
     virtual bool close ();

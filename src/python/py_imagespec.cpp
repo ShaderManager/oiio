@@ -72,7 +72,11 @@ ImageSpec_get_channelformats(const ImageSpec& spec)
     size_t size = spec.channelformats.size();
     PyObject* result = PyTuple_New(size);
     for (size_t i = 0; i < size; ++i)
+#if PY_MAJOR_VERSION >= 3
+        PyTuple_SetItem(result, i, PyLong_FromLong((long)spec.channelformats[i].basetype));
+#else
         PyTuple_SetItem(result, i, PyInt_FromLong((long)spec.channelformats[i].basetype));
+#endif
     return object(handle<>(result));
 }
 
@@ -82,11 +86,18 @@ static void
 ImageSpec_set_channelformats(ImageSpec& spec, const tuple& channelformats)
 {
     const size_t length = len(channelformats);
-    spec.channelformats.resize(length);
+    spec.channelformats.resize(length, spec.format);
     for (size_t i = 0; i < length; ++i) {
-        extract<int> e (channelformats[i]);
-        int base = e.check() ? e() : 0;
-        spec.channelformats[i] = (TypeDesc::BASETYPE)base;
+        extract<int> base (channelformats[i]);
+        if (base.check()) {
+            spec.channelformats[i] = (TypeDesc::BASETYPE)base();
+            continue;
+        }
+        extract<TypeDesc> type (channelformats[i]);
+        if (type.check()) {
+            spec.channelformats[i] = type();
+            continue;
+        }
     }
 }
 
@@ -163,6 +174,15 @@ static void
 ImageSpec_set_format_2(ImageSpec& spec, TypeDesc::BASETYPE basetype)
 {
     spec.set_format (basetype);
+}
+
+
+static void
+ImageSpec_erase_attribute (ImageSpec& spec, const std::string &name,
+                           TypeDesc searchtype=TypeDesc::UNKNOWN,
+                           bool casesensitive=false)
+{
+    spec.erase_attribute (name, searchtype, casesensitive);
 }
 
 
@@ -259,18 +279,27 @@ static object
 ImageSpec_get_attribute_typed (const ImageSpec& spec,
                                const std::string &name, TypeDesc type)
 {
-    const ImageIOParameter *p = spec.find_attribute (name, type);
+    ImageIOParameter tmpparam;
+    const ImageIOParameter *p = spec.find_attribute (name, tmpparam, type);
     if (!p)
         return object();   // None
     type = p->type();
     if (type.basetype == TypeDesc::INT) {
+#if PY_MAJOR_VERSION >= 3
+        return C_to_val_or_tuple ((const int *)p->data(), type, PyLong_FromLong);
+#else
         return C_to_val_or_tuple ((const int *)p->data(), type, PyInt_FromLong);
+#endif
     }
     if (type.basetype == TypeDesc::FLOAT) {
         return C_to_val_or_tuple ((const float *)p->data(), type, PyFloat_FromDouble);
     }
     if (type.basetype == TypeDesc::STRING) {
+#if PY_MAJOR_VERSION >= 3
+        return C_to_val_or_tuple ((const char **)p->data(), type, PyUnicode_FromString);
+#else
         return C_to_val_or_tuple ((const char **)p->data(), type, PyString_FromString);
+#endif
     }
     return object();
 }
@@ -360,10 +389,6 @@ void declare_imagespec()
         .def_readwrite("alpha_channel", &ImageSpec::alpha_channel)
         .def_readwrite("z_channel",     &ImageSpec::z_channel)
         .def_readwrite("deep",          &ImageSpec::deep)
-        .def_readwrite("quant_black",   &ImageSpec::quant_black)
-        .def_readwrite("quant_white",   &ImageSpec::quant_white)
-        .def_readwrite("quant_min",     &ImageSpec::quant_min)
-        .def_readwrite("quant_max",     &ImageSpec::quant_max)
         .add_property("extra_attribs", 
             boost::python::make_getter(&ImageSpec::extra_attribs))//ImageIOParameterList
         
@@ -373,8 +398,6 @@ void declare_imagespec()
         .def("set_format",              &ImageSpec::set_format)
         .def("set_format",              &ImageSpec_set_format_2)
         .def("default_channel_names",   &ImageSpec::default_channel_names)
-        .def("format_from_quantize",    &ImageSpec::format_from_quantize)
-        .staticmethod("format_from_quantize")
         .def("channel_bytes",           &ImageSpec_channel_bytes_1)
         .def("channel_bytes",           &ImageSpec_channel_bytes_2)
         .def("channel_bytes",           &ImageSpec_channel_bytes_3)
@@ -413,8 +436,12 @@ void declare_imagespec()
         .def("get_string_attribute", &ImageSpec_get_string_attribute_d)
         .def("get_attribute", &ImageSpec_get_attribute_typed)
         .def("get_attribute", &ImageSpec_get_attribute_untyped)
+        .def("erase_attribute", &ImageSpec_erase_attribute,
+             (arg("name")="", arg("type")=TypeDesc(TypeDesc::UNKNOWN),
+              arg("casesensitive")=false))
 
         .def("metadata_val", &ImageSpec::metadata_val)
+        .staticmethod("metadata_val")
     ;          
 }
 

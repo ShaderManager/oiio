@@ -23,11 +23,13 @@ Major contributors (roughly in order of joining the project):
     Alan Jones           Softimage PIC
     Krzysztof Blicharski sockets
     Nuno Cardoso         PNM
-    Mikael Sundell       IFF
+    Mikael Sundell       IFF, FFmpeg
     Jeremy Selan         Color space issues, maketx improvements, OpenColorIO
                            integration
     Daniel Wyatt         PSD
     Mariusz Szczepanczyk GIF
+    Mark Boorer          RAW
+    Nathan Rusch         Nuke plugins
 
 Other contributors (alphabetically):
 
@@ -36,15 +38,20 @@ Other contributors (alphabetically):
     Shane Ambler
     Basileios Anastasatos
     Cassian Andrei
-    Mark Boorer
+    Heiko Becker
     Solomon Boulos
+    John Burnett
     Nicolas Burtnyk
     Kevin Brightwell
     Fabien Castan
     Duncan Chan
+    Guillaume Chatelet
     Irena Damsky
     Brent Davis
     Ben De Luca
+    Frédéric Devernay
+    Thomas Dinges
+    Chad Dombrova
     Nandan Dubey
     Sebastian Elsner
     Julien Enche
@@ -56,6 +63,11 @@ Other contributors (alphabetically):
     Manuel Gamito
     Ananth Garre
     Deepak Gopinath
+    John Haddon
+    Brian Hall
+    Changlin Hsieh
+    Justin Israel
+    Thiago Ize
     Puneet Jain
     Saket Jalan
     Pavel Karneliuk
@@ -69,20 +81,27 @@ Other contributors (alphabetically):
     Lukasz Maliszewski
     Justina Mikonyte
     Paul Molodowitch
+    Bastien Montagne
     Ramon Montoya
+    Gregor Mueckl
     Alexander Murashko
     Samuel Nicholas
+    Leonid Onokhov
+    Lucas Panian
     M Joonas Pihlaja
+    Morteza Ramezanali
     Carl Rand
     Sam Richards
     Jeremy Rose
     Ryen
+    Lukas Schrangl
     Alex Schworer
     Aman Shah
     Richard Shaw
+    Troy James Sobotka
     Stefan Stavrev
     Cliff Stein
-    Mikael Sundell
+    Mariusz Szczepanczyk
     Ott Tinn
     Edgar Velazquez-Armendariz
     Matteo F. Vescovi
@@ -90,6 +109,7 @@ Other contributors (alphabetically):
     Brecht Van Lommel
     Wormszer
     Xo Wang
+    Yang Yang
     Nicholas Yue
 
 

@@ -35,10 +35,10 @@
 #undef SIZEOF_LONG
 #include <boost/python.hpp>
 
-#include "imageio.h"
-#include "typedesc.h"
-#include "imagecache.h"
-#include "imagebuf.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imagecache.h"
+#include "OpenImageIO/imagebuf.h"
 
 
 #if PY_MAJOR_VERSION < 2 || (PY_MAJOR_VERSION == 2 && PY_MINOR_VERSION < 5)
@@ -57,6 +57,7 @@ void declare_imageinput();
 void declare_imageoutput();
 void declare_typedesc();
 void declare_roi();
+void declare_deepdata();
 void declare_imagecache();
 void declare_imagebuf();
 void declare_imagebufalgo();
@@ -64,6 +65,17 @@ void declare_paramvalue();
 void declare_global();
 
 bool PyProgressCallback(void*, float);
+object C_array_to_Python_array (const char *data, TypeDesc type, size_t size);
+const char * python_array_code (TypeDesc format);
+TypeDesc typedesc_from_python_array_code (char code);
+
+
+// Given python array 'data', figure out its element type and number of
+// elements, and return the memory address of its contents.  Return NULL as
+// the address for an error.
+const void * python_array_address (numeric::array &data, TypeDesc &elementtype,
+                                   size_t &numelements);
+
 
 
 // Suck up one or more presumed T values into a vector<T>
@@ -89,6 +101,16 @@ void py_to_stdvector (std::vector<T> &vals, const tuple &tup)
 {
     for (int i = 0, e = len(tup); i < e; ++i)
         py_to_stdvector<T> (vals, tup[i]);
+}
+
+
+
+// Suck up a tuple of presumed T values into a vector<T>
+template<typename T>
+void py_to_stdvector (std::vector<T> &vals, const numeric::array &arr)
+{
+    for (int i = 0, e = len(arr); i < e; ++i)
+        vals.push_back (extract<T>(arr[i]));
 }
 
 
@@ -125,6 +147,18 @@ object C_to_val_or_tuple (const T *vals, TypeDesc type, FUNC f)
 
 
 
+// Helper class to release the GIL, allowing other Python threads to
+// proceed, then re-acquire it again when the scope ends.
+class ScopedGILRelease {
+public:
+    ScopedGILRelease () : m_thread_state(PyEval_SaveThread()) { }
+    ~ScopedGILRelease () { PyEval_RestoreThread (m_thread_state); }
+private:
+    PyThreadState *m_thread_state;
+};
+
+
+
 class ImageInputWrap {
 private:
     /// Friend declaration for ImageOutputWrap::copy_image
@@ -140,7 +174,7 @@ public:
     bool open_regular (const std::string &name);
     bool open_with_config(const std::string &name, const ImageSpec &config);
     const ImageSpec &spec() const;
-    bool supports (const std::string &feature) const;
+    int supports (const std::string &feature) const;
     bool close();
     int current_subimage() const;
     int current_miplevel() const;
@@ -153,6 +187,11 @@ public:
     object read_tiles (int xbegin, int xend, int ybegin, int yend,
                        int zbegin, int zend, int chbegin, int chend,
                        TypeDesc format);
+    object read_native_deep_scanlines (int ybegin, int yend, int z,
+                                       int chbegin, int chend);
+    object read_native_deep_tiles (int xbegin, int xend, int ybegin, int yend,
+                                   int zbegin, int zend, int chbegin, int chend);
+    object read_native_deep_image ();
     std::string geterror() const;
 };
 
@@ -173,10 +212,12 @@ public:
                          stride_t xstride=AutoStride);
     bool write_scanline_bt (int, int, TypeDesc::BASETYPE,
                             boost::python::object&, stride_t xstride=AutoStride);
+    bool write_scanline_array (int, int, numeric::array&);
     bool write_scanlines (int, int, int, TypeDesc, boost::python::object&,
                          stride_t xstride=AutoStride);
     bool write_scanlines_bt (int, int, int, TypeDesc::BASETYPE,
                             boost::python::object&, stride_t xstride=AutoStride);
+    bool write_scanlines_array (int, int, int, numeric::array&);
     bool write_tile (int, int, int, TypeDesc, boost::python::object&,
                      stride_t xstride=AutoStride, stride_t ystride=AutoStride,
                      stride_t zstride=AutoStride);
@@ -184,6 +225,7 @@ public:
                         boost::python::object&, stride_t xstride=AutoStride,
                         stride_t ystride=AutoStride,
                         stride_t zstride=AutoStride);
+    bool write_tile_array (int, int, int, numeric::array&);
     bool write_tiles (int, int, int, int, int, int,
                       TypeDesc, boost::python::object&,
                       stride_t xstride=AutoStride, stride_t ystride=AutoStride,
@@ -193,6 +235,7 @@ public:
                          stride_t xstride=AutoStride,
                          stride_t ystride=AutoStride,
                          stride_t zstride=AutoStride);
+    bool write_tiles_array (int, int, int, int, int, int, numeric::array&);
     bool write_image (TypeDesc format, object &buffer,
                       stride_t xstride=AutoStride,
                       stride_t ystride=AutoStride,
@@ -201,9 +244,15 @@ public:
                          stride_t xstride=AutoStride,
                          stride_t ystride=AutoStride,
                          stride_t zstride=AutoStride);
+    bool write_image_array (numeric::array &buffer);
+    bool write_deep_scanlines (int ybegin, int yend, int z,
+                               const DeepData &deepdata);
+    bool write_deep_tiles (int xbegin, int xend, int ybegin, int yend,
+                           int zbegin, int zend, const DeepData &deepdata);
+    bool write_deep_image (const DeepData &deepdata);
     bool copy_image (ImageInputWrap *iiw);
     const char *format_name () const;
-    bool supports (const std::string&) const;
+    int supports (const std::string&) const;
     std::string geterror()const;
 };
 
@@ -229,7 +278,8 @@ public:
     bool getattribute_char(const std::string&, char**);    
     bool getattribute_string(const std::string&, std::string&);
     std::string resolve_filename (const std::string&);
-    bool get_image_info (ustring, ustring, TypeDesc, void*);
+    bool get_image_info_old (ustring, ustring, TypeDesc, void*);
+    bool get_image_info (ustring, int, int, ustring, TypeDesc, void*);
     bool get_imagespec(ustring, ImageSpec&, int);
     bool get_pixels (ustring, int, int, int, int, int, int, 
                      int, int, TypeDesc, void*);

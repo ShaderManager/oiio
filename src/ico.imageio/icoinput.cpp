@@ -35,12 +35,12 @@
 #include "ico.h"
 #include "../png.imageio/png_pvt.h"
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "imageio.h"
-#include "thread.h"
-#include "strutil.h"
-#include "fmath.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/thread.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/fmath.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -156,16 +156,13 @@ ICOInput::seek_subimage (int subimage, int miplevel, ImageSpec &newspec)
 {
     /*std::cerr << "[ico] seeking subimage " << index << " (current "
               << m_subimage << ") out of " << m_ico.count << "\n";*/
-    if (miplevel != 0)
+    if (miplevel != 0 || subimage < 0 || subimage >= m_ico.count)
         return false;
 
     if (subimage == m_subimage) {
         newspec = spec();
         return true;
     }
-
-    if (subimage < 0 || subimage >= m_ico.count)
-        return false;
 
     // clear the buffer of previous data
     m_buf.clear ();

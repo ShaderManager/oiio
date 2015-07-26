@@ -37,12 +37,11 @@
 #include <boost/filesystem.hpp>
 #include <boost/foreach.hpp>
 
-#include "dassert.h"
-#include "plugin.h"
-#include "strutil.h"
-#include "filesystem.h"
-
-#include "imageio.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/plugin.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/imageio.h"
 #include "imageio_pvt.h"
 
 
@@ -212,6 +211,7 @@ catalog_plugin (const std::string &format_name,
     PLUGENTRY (cineon);
     PLUGENTRY (dds);
     PLUGENTRY (dpx);
+    PLUGENTRY (ffmpeg);
     PLUGENTRY (field3d);
     PLUGENTRY (fits);
     PLUGENTRY (gif);
@@ -225,6 +225,7 @@ catalog_plugin (const std::string &format_name,
     PLUGENTRY (pnm);
     PLUGENTRY (psd);
     PLUGENTRY (ptex);
+    PLUGENTRY (raw);
     PLUGENTRY (rla);
     PLUGENTRY (sgi);
     PLUGENTRY (socket);
@@ -260,6 +261,9 @@ catalog_builtin_plugins ()
     DECLAREPLUG (cineon);
     DECLAREPLUG (dds);
     DECLAREPLUG (dpx);
+#ifdef USE_FFMPEG
+    DECLAREPLUG (ffmpeg);
+#endif
 #ifdef USE_FIELD3D
     DECLAREPLUG (field3d);
 #endif
@@ -279,6 +283,9 @@ catalog_builtin_plugins ()
     DECLAREPLUG (pnm);
     DECLAREPLUG (psd);
     DECLAREPLUG (ptex);
+#ifdef USE_LIBRAW
+    DECLAREPLUG (raw);
+#endif
     DECLAREPLUG (rla);
     DECLAREPLUG (sgi);
 #ifdef USE_BOOST_ASIO
@@ -298,6 +305,25 @@ catalog_builtin_plugins ()
 
 
 
+static void
+append_if_env_exists (std::string &searchpath, const char *env,
+                      bool prepend=false)
+{
+    const char *path = getenv (env);
+    if (path && *path) {
+        std::string newpath = path;
+        if (searchpath.length()) {
+            if (prepend)
+                newpath = newpath + ':' + searchpath;
+            else
+                newpath = searchpath + ':' + newpath;
+        }
+        searchpath = newpath;
+    }
+}
+
+
+
 /// Look at ALL imageio plugins in the searchpath and add them to the
 /// catalog.  This routine is not reentrant and should only be called
 /// by a routine that is holding a lock on imageio_mutex.
@@ -306,13 +332,13 @@ pvt::catalog_all_plugins (std::string searchpath)
 {
     catalog_builtin_plugins ();
 
-    const char *oiio_library_path = getenv ("OIIO_LIBRARY_PATH");
-    if (oiio_library_path && *oiio_library_path) {
-        std::string newpath = oiio_library_path;
-        if (searchpath.length())
-            newpath = newpath + ':' + searchpath;
-        searchpath = newpath;
-    }
+    append_if_env_exists (searchpath, "OIIO_LIBRARY_PATH", true);
+#ifdef __APPLE__
+    append_if_env_exists (searchpath, "DYLD_LIBRARY_PATH");
+#endif
+#if defined(__linux__) || defined(__FreeBSD__)
+    append_if_env_exists (searchpath, "LD_LIBRARY_PATH");
+#endif
 
     size_t patlen = pattern.length();
     std::vector<std::string> dirs;
@@ -384,6 +410,14 @@ ImageOutput::create (const std::string &filename,
 
     ASSERT (create_function != NULL);
     return (ImageOutput *) create_function();
+}
+
+
+
+void
+ImageOutput::destroy (ImageOutput *x)
+{
+    delete x;
 }
 
 
@@ -537,6 +571,15 @@ ImageInput::create (const std::string &filename,
 
     return (ImageInput *) create_function();
 }
+
+
+
+void
+ImageInput::destroy (ImageInput *x)
+{
+    delete x;
+}
+
 
 }
 OIIO_NAMESPACE_EXIT

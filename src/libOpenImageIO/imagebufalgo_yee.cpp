@@ -39,11 +39,11 @@
 #include <OpenEXR/ImathColor.h>
 using Imath::Color3f;
 
-#include "fmath.h"
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "imagebufalgo_util.h"
-#include "dassert.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/imagebufalgo_util.h"
+#include "OpenImageIO/dassert.h"
 
 
 template<class T>
@@ -272,7 +272,7 @@ ImageBufAlgo::compare_Yee (const ImageBuf &img0, const ImageBuf &img1,
     ImageBuf aLum;
     int channelorder[] = { 1 };  // channel to copy
     ImageBufAlgo::channels (aLum, aLAB, 1, channelorder);
-    ImageBufAlgo::mul (aLum, luminance, ROI::All(), nthreads);
+    ImageBufAlgo::mul (aLum, aLum, luminance, ROI::All(), nthreads);
     XYZToLAB (aLAB, ROI::All(), nthreads);  // now it's LAB
 
     // Same thing for img1/bLAB/bLum
@@ -281,7 +281,7 @@ ImageBufAlgo::compare_Yee (const ImageBuf &img0, const ImageBuf &img1,
     AdobeRGBToXYZ (bLAB, ROI::All(), nthreads);  // contains XYZ now
     ImageBuf bLum;
     ImageBufAlgo::channels (bLum, bLAB, 1, channelorder);
-    ImageBufAlgo::mul (bLum, luminance, ROI::All(), nthreads);
+    ImageBufAlgo::mul (bLum, bLum, luminance, ROI::All(), nthreads);
     XYZToLAB (bLAB, ROI::All(), nthreads);  // now it's LAB
 
     // Construct Gaussian pyramids (not really pyramids, because they all

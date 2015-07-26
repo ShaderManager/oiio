@@ -1,4 +1,4 @@
-#!/usr/bin/python 
+#!/usr/bin/env python
 
 import os
 import glob
@@ -47,6 +47,7 @@ command = ""
 outputs = [ "out.txt" ]    # default
 failureok = 0
 failthresh = 0.004
+hardfail = 0.01
 failpercent = 0.02
 
 #print ("srcdir = " + srcdir)
@@ -122,9 +123,9 @@ def info_command (file, extraargs="", safematch=0, hash=True) :
 # compilers always match to every last floating point bit.
 def diff_command (fileA, fileB, extraargs="", silent=False, concat=True) :
     command = (oiio_app("idiff") + "-a"
-               + " -fail " + str(failthresh/4)
+               + " -fail " + str(failthresh)
                + " -failpercent " + str(failpercent)
-               + " -hardfail " + str(failthresh)
+               + " -hardfail " + str(hardfail)
                + " -warn " + str(2*failthresh)
                + " " + extraargs + " " + oiio_relpath(fileA,tmpdir) 
                + " " + oiio_relpath(fileB,tmpdir))
@@ -173,6 +174,10 @@ def rw_command (dir, filename, testwrite=1, use_oiiotool=0, extraargs="",
             cmd = (cmd + oiio_app("iconvert") + preargs + " " + fn
                    + " " + extraargs + " " + filename + " >> out.txt ;\n")
         cmd = (cmd + oiio_app("idiff") + " -a " + fn
+               + " -fail " + str(failthresh)
+               + " -failpercent " + str(failpercent)
+               + " -hardfail " + str(hardfail)
+               + " -warn " + str(2*failthresh)
                + " " + idiffextraargs + " " + filename + " >> out.txt ;\n")
     return cmd
 
@@ -200,6 +205,7 @@ def oiiotool (args, silent=False, concat=True) :
 # to pass.  If any outputs do not match their references return 1 to
 # fail.
 def runtest (command, outputs, failureok=0) :
+    err = 0
 #    print ("working dir = " + tmpdir)
     os.chdir (srcdir)
     open ("out.txt", "w").close()    # truncate out.txt
@@ -223,9 +229,8 @@ def runtest (command, outputs, failureok=0) :
         if cmdret != 0 and failureok == 0 :
             print ("#### Error: this command failed: ", sub_command)
             print ("FAIL")
-            return (1)
+            err = 1
 
-    err = 0
     for out in outputs :
         extension = os.path.splitext(out)[1]
         ok = 0
@@ -235,7 +240,7 @@ def runtest (command, outputs, failureok=0) :
         # variants for different platforms, etc.
         for testfile in (["ref/"+out] + glob.glob (os.path.join ("ref", "*"+extension))) :
             # print ("comparing " + out + " to " + testfile)
-            if extension == ".tif" or extension == ".exr" or extension == ".jpg":
+            if extension == ".tif" or extension == ".exr" or extension == ".jpg" or extension == ".png":
                 # images -- use idiff
                 cmpcommand = diff_command (out, testfile, concat=False)
                 # print ("cmpcommand = " + cmpcommand)
@@ -271,5 +276,5 @@ with open("run.py") as f:
     exec (code)
 
 # Run the test and check the outputs
-ret = runtest (command, outputs)
+ret = runtest (command, outputs, failureok=failureok)
 sys.exit (ret)

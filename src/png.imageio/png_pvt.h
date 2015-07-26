@@ -32,17 +32,19 @@
 #define OPENIMAGEIO_PNG_PVT_H
 
 #include <png.h>
-
+#include <zlib.h>
 #include <OpenEXR/ImathColor.h>
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "imageio.h"
-#include "strutil.h"
-#include "filesystem.h"
-#include "fmath.h"
-#include "sysutil.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/sysutil.h"
 
+
+#define OIIO_LIBPNG_VERSION (PNG_LIBPNG_VER_MAJOR*10000 + PNG_LIBPNG_VER_MINOR*100 + PNG_LIBPNG_VER_RELEASE)
 
 
 /*
@@ -59,6 +61,9 @@ http://lists.openimageio.org/pipermail/oiio-dev-openimageio.org/2009-April/00065
 */
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
+
+#define ICC_PROFILE_ATTR "ICCProfile"
+
 
 namespace PNG_pvt {
 
@@ -160,6 +165,22 @@ read_info (png_structp& sp, png_infop& ip, int& bit_depth, int& color_type,
             spec.attribute ("oiio:ColorSpace", (gamma == 1) ? "Linear" : "GammaCorrected");
         }
     }
+
+    if (png_get_valid(sp, ip, PNG_INFO_iCCP)) {
+        png_charp profile_name = NULL;
+#if OIIO_LIBPNG_VERSION > 10500   /* PNG function signatures changed */
+        png_bytep profile_data = NULL;
+#else
+        png_charp profile_data = NULL;
+#endif
+        png_uint_32 profile_length = 0;
+        int compression_type;
+        png_get_iCCP (sp, ip, &profile_name, &compression_type,
+                      &profile_data, &profile_length);
+        if (profile_length && profile_data)
+            spec.attribute (ICC_PROFILE_ATTR, TypeDesc(TypeDesc::UINT8, profile_length), profile_data);
+    }
+
     png_timep mod_time;
     if (png_get_tIME (sp, ip, &mod_time)) {
         std::string date = Strutil::format ("%4d:%02d:%02d %2d:%02d:%02d",
@@ -454,7 +475,22 @@ write_info (png_structp& sp, png_infop& ip, int& color_type,
     else if (Strutil::iequals (colorspace, "sRGB")) {
         png_set_sRGB_gAMA_and_cHRM (sp, ip, PNG_sRGB_INTENT_ABSOLUTE);
     }
-    
+
+    // Write ICC profile, if we have anything
+    const ImageIOParameter* icc_profile_parameter = spec.find_attribute(ICC_PROFILE_ATTR);
+    if (icc_profile_parameter != NULL) {
+        unsigned int length = icc_profile_parameter->type().size();
+#if OIIO_LIBPNG_VERSION > 10500 /* PNG function signatures changed */
+        unsigned char *icc_profile = (unsigned char*)icc_profile_parameter->data();
+        if (icc_profile && length)
+            png_set_iCCP (sp, ip, "Embedded Profile", 0, icc_profile, length);
+#else
+        char *icc_profile = (char*)icc_profile_parameter->data();
+        if (icc_profile && length)
+            png_set_iCCP (sp, ip, (png_charp)"Embedded Profile", 0, icc_profile, length);
+#endif
+    }
+
     if (false && ! spec.find_attribute("DateTime")) {
         time_t now;
         time (&now);
@@ -466,13 +502,11 @@ write_info (png_structp& sp, png_infop& ip, int& color_type,
         spec.attribute ("DateTime", date);
     }
 
-    ImageIOParameter *unit=NULL, *xres=NULL, *yres=NULL;
-    if ((unit = spec.find_attribute("ResolutionUnit", TypeDesc::STRING)) &&
-        (xres = spec.find_attribute("XResolution", TypeDesc::FLOAT)) &&
-        (yres = spec.find_attribute("YResolution", TypeDesc::FLOAT))) {
-        const char *unitname = *(const char **)unit->data();
-        const float x = *(const float *)xres->data();
-        const float y = *(const float *)yres->data();
+    string_view unitname = spec.get_string_attribute ("ResolutionUnit");
+    float xres = spec.get_float_attribute ("XResolution");
+    float yres = spec.get_float_attribute ("YResolution");
+    float paspect = spec.get_float_attribute ("PixelAspectRatio");
+    if (xres || yres || paspect || unitname.size()) {
         int unittype = PNG_RESOLUTION_UNKNOWN;
         float scale = 1;
         if (Strutil::iequals (unitname, "meter") || Strutil::iequals (unitname, "m"))
@@ -484,8 +518,23 @@ write_info (png_structp& sp, png_infop& ip, int& color_type,
             unittype = PNG_RESOLUTION_METER;
             scale = 100.0/2.54;
         }
-        png_set_pHYs (sp, ip, (png_uint_32)(x*scale),
-                      (png_uint_32)(y*scale), unittype);
+        if (paspect) {
+            // If pixel aspect is given, allow resolution to be reset
+            if (xres)
+                yres = 0.0f;
+            else
+                xres = 0.0f;
+        }
+        if (xres == 0.0f && yres == 0.0f) {
+            xres = 100.0f;
+            yres = xres * (paspect ? paspect : 1.0f);
+        } else if (xres == 0.0f) {
+            xres = yres / (paspect ? paspect : 1.0f);
+        } else if (yres == 0.0f) {
+            yres = xres * (paspect ? paspect : 1.0f);
+        }
+        png_set_pHYs (sp, ip, (png_uint_32)(xres*scale),
+                      (png_uint_32)(yres*scale), unittype);
     }
 
     // Deal with all other params
